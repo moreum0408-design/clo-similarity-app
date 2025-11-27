@@ -1,0 +1,8 @@
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip
+python -m pip install pandas scikit-learn openpyxl
+
+
+
+python -m pip list
+

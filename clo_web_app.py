@@ -25,12 +25,13 @@ if not os.path.exists(DATA_FILE):
 
 df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME)
 
+# required columns except for course name (we'll handle Course/COURSE flexibly)
 required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
 for col in required_cols:
     if col not in df.columns:
         raise ValueError(f"Missing column: {col}")
 
-# handle COURSE vs Course column name automatically
+# detect COURSE column name (Course vs COURSE)
 if "COURSE" in df.columns:
     COURSE_COL = "COURSE"
 elif "Course" in df.columns:
@@ -51,7 +52,7 @@ def build_clo_label(row, max_len=90):
 
 
 CLO_OPTIONS = [
-    {"id": idx, "label": build_clo_label(row)}
+    {"id": int(idx), "label": build_clo_label(row)}
     for idx, row in df.iterrows()
 ]
 
@@ -60,7 +61,6 @@ CLO_OPTIONS = [
 # ---------------------------------------------------------
 vectorizer = TfidfVectorizer()
 tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse matrix (N, features)
-
 
 # ---------------------------------------------------------
 # Similarity Functions
@@ -73,15 +73,17 @@ def cosine_sim_rows(i, j):
 
 COURSE_TO_ROWS = defaultdict(list)
 for idx, row in df.iterrows():
-    COURSE_TO_ROWS[row[COURSE_COL]].append(idx)
+    COURSE_TO_ROWS[row[COURSE_COL]].append(int(idx))
 
 
 def mean_vector(indices):
-    """Return a 1xD ndarray representing the mean TF-IDF vector."""
+    """
+    Return a 1xD ndarray representing the mean TF-IDF vector for the given
+    row indices. Converts from np.matrix to ndarray explicitly.
+    """
     if not indices:
         return None
     sub = tfidf_matrix[indices]
-    # sub.mean(axis=0) returns a numpy.matrix; convert to ndarray and keep 2D
     arr = np.asarray(sub.mean(axis=0)).ravel()
     return arr.reshape(1, -1)
 
@@ -120,6 +122,9 @@ def course_vs_course_similarity(course_a, course_b):
 
 
 def parse_course_prefix_and_level(course_code):
+    """
+    From e.g. 'CJUS 788' get ('CJUS', 700).
+    """
     if not course_code:
         return None, None
     code = course_code.replace(" ", "")
@@ -134,6 +139,10 @@ def parse_course_prefix_and_level(course_code):
 
 
 def course_vs_level_similarity(course_a):
+    """
+    Compare one course vs ALL courses of same prefix + level (e.g. CJUS 7xx).
+    Returns list of dicts sorted by overall similarity.
+    """
     prefix, level = parse_course_prefix_and_level(course_a)
     if prefix is None or level is None:
         return []
@@ -156,6 +165,13 @@ def course_vs_level_similarity(course_a):
     candidates.sort(key=lambda x: x["overall"], reverse=True)
     return candidates
 
+
+def get_course_clos(course):
+    """Return list of CLO texts for a given course."""
+    if not course:
+        return []
+    rows = df[df[COURSE_COL] == course]["CLO_TEXT"]
+    return rows.tolist()
 
 # ---------------------------------------------------------
 # FLASK APP
@@ -267,6 +283,15 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 </div>
 {% endif %}
 
+{% if clo_sim is not none %}
+<div class="result">
+    <h2>CLO vs CLO</h2>
+    <p><strong>{{clo_a_text}}</strong></p>
+    <p><strong>{{clo_b_text}}</strong></p>
+    <p>Similarity: <span class="sim">{{clo_sim|round(3)}}</span></p>
+</div>
+{% endif %}
+
 </body>
 </html>
 """
@@ -286,6 +311,7 @@ def index():
     clo_sim = None
     clo_a_text = ""
     clo_b_text = ""
+    base_course_clos = []
 
     if request.method == "POST":
         if mode == "course":
@@ -296,12 +322,12 @@ def index():
             else:
                 course_result = course_vs_course_similarity(course_a, course_b)
 
-            elif mode == "course_level":
-                if not course_a:
-                    error = "Select a course."
-                else:
-                    level_results = course_vs_level_similarity(course_a)
-                    base_course_clos = get_course_clos(course_a)
+        elif mode == "course_level":
+            if not course_a:
+                error = "Select a course."
+            else:
+                level_results = course_vs_level_similarity(course_a)
+                base_course_clos = get_course_clos(course_a)
 
         elif mode == "clo":
             if not clo_a or not clo_b:

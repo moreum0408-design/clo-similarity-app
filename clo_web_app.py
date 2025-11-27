@@ -1,12 +1,11 @@
 import os
 import re
-import math
 from collections import defaultdict
 from textwrap import shorten
 
 from flask import Flask, request, render_template_string
 import pandas as pd
-import numpy as pd
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -26,21 +25,30 @@ if not os.path.exists(DATA_FILE):
 
 df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME)
 
-REQUIRED = ["COLLEGE", "Program", "COURSE", "CLO_TEXT"]
-for col in REQUIRED:
+required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
+for col in required_cols:
     if col not in df.columns:
         raise ValueError(f"Missing column: {col}")
 
+# handle COURSE vs Course column name automatically
+if "COURSE" in df.columns:
+    COURSE_COL = "COURSE"
+elif "Course" in df.columns:
+    COURSE_COL = "Course"
+else:
+    raise ValueError("Could not find a COURSE or Course column in the Excel file.")
+
 df["CLO_TEXT"] = df["CLO_TEXT"].fillna("").astype(str)
-df["COURSE"] = df["COURSE"].astype(str)
+df[COURSE_COL] = df[COURSE_COL].astype(str)
 df["Program"] = df["Program"].astype(str)
 
-# build dropdown
-COURSES = sorted(df["COURSE"].unique())
+COURSES = sorted(df[COURSE_COL].unique())
+
 
 def build_clo_label(row, max_len=90):
-    base = f"{row['COURSE']} – {row['CLO_TEXT']}"
+    base = f"{row[COURSE_COL]} – {row['CLO_TEXT']}"
     return shorten(base, width=max_len, placeholder="…")
+
 
 CLO_OPTIONS = [
     {"id": idx, "label": build_clo_label(row)}
@@ -51,7 +59,8 @@ CLO_OPTIONS = [
 # TF-IDF (scikit-learn)
 # ---------------------------------------------------------
 vectorizer = TfidfVectorizer()
-tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])   # shape (N, features)
+tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse matrix (N, features)
+
 
 # ---------------------------------------------------------
 # Similarity Functions
@@ -61,16 +70,21 @@ def cosine_sim_rows(i, j):
     v2 = tfidf_matrix[j]
     return float(cosine_similarity(v1, v2)[0, 0])
 
+
 COURSE_TO_ROWS = defaultdict(list)
 for idx, row in df.iterrows():
-    COURSE_TO_ROWS[row["COURSE"]].append(idx)
+    COURSE_TO_ROWS[row[COURSE_COL]].append(idx)
+
 
 def mean_vector(indices):
+    """Return a 1xD ndarray representing the mean TF-IDF vector."""
     if not indices:
         return None
     sub = tfidf_matrix[indices]
-    mean = sub.mean(axis=0)
-    return mean
+    # sub.mean(axis=0) returns a numpy.matrix; convert to ndarray and keep 2D
+    arr = np.asarray(sub.mean(axis=0)).ravel()
+    return arr.reshape(1, -1)
+
 
 def course_vs_course_similarity(course_a, course_b):
     idx_a = COURSE_TO_ROWS.get(course_a, [])
@@ -81,12 +95,12 @@ def course_vs_course_similarity(course_a, course_b):
 
     mean_a = mean_vector(idx_a)
     mean_b = mean_vector(idx_b)
-
-    # convert possible np.matrix to regular ndarrays, then keep them 2D
-    mean_a = np.asarray(mean_a).reshape(1, -1)
-    mean_b = np.asarray(mean_b).reshape(1, -1)
+    if mean_a is None or mean_b is None:
+        return None
 
     overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
+
+    sim_matrix = cosine_similarity(tfidf_matrix[idx_a], tfidf_matrix[idx_b])
 
     details = []
     for i_local, i_global in enumerate(idx_a):
@@ -104,6 +118,7 @@ def course_vs_course_similarity(course_a, course_b):
 
     return {"overall": overall, "details": details}
 
+
 def parse_course_prefix_and_level(course_code):
     if not course_code:
         return None, None
@@ -116,6 +131,7 @@ def parse_course_prefix_and_level(course_code):
     num = m_num.group(1)
     level = int(num[0]) * 100
     return prefix, level
+
 
 def course_vs_level_similarity(course_a):
     prefix, level = parse_course_prefix_and_level(course_a)
@@ -140,8 +156,9 @@ def course_vs_level_similarity(course_a):
     candidates.sort(key=lambda x: x["overall"], reverse=True)
     return candidates
 
+
 # ---------------------------------------------------------
-# FLASK
+# FLASK APP
 # ---------------------------------------------------------
 app = Flask(__name__)
 
@@ -150,10 +167,10 @@ HTML = """<!doctype html>
 <head>
 <title>CLO Similarity Tool</title>
 <style>
-body { font-family: Arial; margin: 20px; }
+body { font-family: Arial, sans-serif; margin: 20px; }
 .result { margin-top: 20px; padding: 15px; background: #f5f5f5; }
 table { border-collapse: collapse; width: 100%; margin-top: 10px;}
-th, td { border: 1px solid #ccc; padding: 8px; }
+th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 .sim { font-weight:bold; }
 </style>
 </head>
@@ -228,7 +245,7 @@ th, td { border: 1px solid #ccc; padding: 8px; }
 
 {% if level_results %}
 <div class="result">
-    <h2>Course vs Same Level</hh2>
+    <h2>Course vs Same Level</h2>
     <table>
         <tr><th>Course</th><th>Similarity</th></tr>
         {% for r in level_results %}
@@ -241,7 +258,7 @@ th, td { border: 1px solid #ccc; padding: 8px; }
 </div>
 {% endif %}
 
-{% if clo_sim %}
+{% if clo_sim is not none %}
 <div class="result">
     <h2>CLO vs CLO</h2>
     <p><strong>{{clo_a_text}}</strong></p>
@@ -254,10 +271,6 @@ th, td { border: 1px solid #ccc; padding: 8px; }
 </html>
 """
 
-def sim_class(v):
-    if v >= 0.75: return "high"
-    if v >= 0.5: return "medium"
-    return "low"
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -317,6 +330,7 @@ def index():
         clo_b_text=clo_b_text,
         error=error,
     )
+
 
 if __name__ == "__main__":
     app.run(debug=False)

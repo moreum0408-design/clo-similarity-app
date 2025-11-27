@@ -246,24 +246,24 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 {% if level_results %}
 <div class="result">
     <h2>Course vs Same Level</h2>
+
+    <p><strong>CLOs for {{ course_a }}</strong></p>
+    <ul>
+        {% for clo_text in base_course_clos %}
+            <li>{{ clo_text }}</li>
+        {% endfor %}
+    </ul>
+
+    <h3>Similarity to other same-level courses</h3>
     <table>
-        <tr><th>Course</th><th>Similarity</th></tr>
+        <tr><th>Course</th><th>Overall Similarity</th></tr>
         {% for r in level_results %}
         <tr>
-            <td>{{r.course_b}}</td>
-            <td class="sim">{{r.overall|round(3)}}</td>
+            <td>{{ r.course_b }}</td>
+            <td class="sim">{{ r.overall|round(3) }}</td>
         </tr>
         {% endfor %}
     </table>
-</div>
-{% endif %}
-
-{% if clo_sim is not none %}
-<div class="result">
-    <h2>CLO vs CLO</h2>
-    <p><strong>{{clo_a_text}}</strong></p>
-    <p><strong>{{clo_b_text}}</strong></p>
-    <p>Similarity: <span class="sim">{{clo_sim|round(3)}}</span></p>
 </div>
 {% endif %}
 
@@ -296,11 +296,12 @@ def index():
             else:
                 course_result = course_vs_course_similarity(course_a, course_b)
 
-        elif mode == "course_level":
-            if not course_a:
-                error = "Select a course."
-            else:
-                level_results = course_vs_level_similarity(course_a)
+            elif mode == "course_level":
+                if not course_a:
+                    error = "Select a course."
+                else:
+                    level_results = course_vs_level_similarity(course_a)
+                    base_course_clos = get_course_clos(course_a)
 
         elif mode == "clo":
             if not clo_a or not clo_b:
@@ -329,6 +330,7 @@ def index():
         clo_a_text=clo_a_text,
         clo_b_text=clo_b_text,
         error=error,
+        base_course_clos=base_course_clos,
     )
 
 

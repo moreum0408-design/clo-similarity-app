@@ -6,6 +6,7 @@ from textwrap import shorten
 
 from flask import Flask, request, render_template_string
 import pandas as pd
+import numpy as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -81,9 +82,11 @@ def course_vs_course_similarity(course_a, course_b):
     mean_a = mean_vector(idx_a)
     mean_b = mean_vector(idx_b)
 
-    overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
+    # convert possible np.matrix to regular ndarrays, then keep them 2D
+    mean_a = np.asarray(mean_a).reshape(1, -1)
+    mean_b = np.asarray(mean_b).reshape(1, -1)
 
-    sim_matrix = cosine_similarity(tfidf_matrix[idx_a], tfidf_matrix[idx_b])
+    overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
 
     details = []
     for i_local, i_global in enumerate(idx_a):

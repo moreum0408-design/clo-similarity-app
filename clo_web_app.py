@@ -23,7 +23,8 @@ if not os.path.exists(DATA_FILE):
         f"Could not find {DATA_FILE}. Put it in the same folder as clo_web_app.py."
     )
 
-df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME)
+# IMPORTANT: reset_index to force 0..N-1 row index that matches TF-IDF rows
+df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME).reset_index(drop=True)
 
 required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
 for col in required_cols:
@@ -55,6 +56,7 @@ tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse (N, D)
 # ---------------------------------------------------------
 COURSE_TO_ROWS = defaultdict(list)
 for idx, row in df.iterrows():
+    # idx is now guaranteed to be 0..N-1 because of reset_index(drop=True)
     COURSE_TO_ROWS[row[COURSE_COL]].append(int(idx))
 
 
@@ -137,11 +139,12 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
 
     comp_indices = []
     for idx, course in df[COURSE_COL].items():
-        # skip all CLOs from the same course
+        # idx is 0..N-1 because of reset_index(drop=True)
         if course == base_course:
+            # skip CLOs from the same course
             continue
-        # only same level across ALL departments
         if parse_course_level(course) != base_level:
+            # only same-level across ALL departments
             continue
         comp_indices.append(idx)
 
@@ -151,7 +154,7 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
     comp_mat = tfidf_matrix[comp_indices]             # M x D
     sims = cosine_similarity(base_vec, comp_mat)[0]   # length M
 
-    # First build raw results
+    # Build raw results
     raw_rows = []
     for idx, sim in zip(comp_indices, sims):
         raw_rows.append(

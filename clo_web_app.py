@@ -23,7 +23,7 @@ if not os.path.exists(DATA_FILE):
         f"Could not find {DATA_FILE}. Put it in the same folder as clo_web_app.py."
     )
 
-# IMPORTANT: reset_index to force 0..N-1 row index that matches TF-IDF rows
+# IMPORTANT: ensure index is 0..N-1 so indices == TF-IDF row numbers
 df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME).reset_index(drop=True)
 
 required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
@@ -56,15 +56,13 @@ tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse (N, D)
 # ---------------------------------------------------------
 COURSE_TO_ROWS = defaultdict(list)
 for idx, row in df.iterrows():
-    # idx is now guaranteed to be 0..N-1 because of reset_index(drop=True)
     COURSE_TO_ROWS[row[COURSE_COL]].append(int(idx))
 
 
 def parse_course_level(course_code: str):
     """
-    From e.g. 'CJUS 887' -> 800
-    Only uses the first digit of the numeric part (hundreds level),
-    ignores department prefix entirely.
+    From e.g. 'HOMI610' or 'CJUS 887' -> 600 or 800.
+    Uses first digit of numeric part (hundreds level), ignores prefix.
     """
     if not course_code:
         return None
@@ -79,7 +77,7 @@ def parse_course_level(course_code: str):
 
 
 def mean_vector(indices):
-    """1 x D ndarray mean TF-IDF vector for given row indices."""
+    """Return 1 x D ndarray mean TF-IDF vector for given row indices."""
     if not indices:
         return None
     sub = tfidf_matrix[indices]
@@ -89,7 +87,7 @@ def mean_vector(indices):
 
 def course_vs_level_similarity(course_a):
     """
-    Overall similarity: one course vs ALL same-level courses (e.g. any 4xx or 8xx),
+    Overall similarity: one course vs ALL same-level courses (e.g. any 4xx/6xx/8xx),
     regardless of department prefix.
     """
     base_level = parse_course_level(course_a)
@@ -125,10 +123,10 @@ def course_vs_level_similarity(course_a):
 
 def clo_vs_same_level_clos(base_idx, max_results=100):
     """
-    ONE CLO index vs ALL CLOs of all OTHER same-level courses (e.g. any 4xx/8xx),
-    excluding:
+    ONE CLO index vs ALL CLOs of all OTHER same-level courses
+    (e.g. any 4xx/6xx/8xx), excluding:
       - CLOs from the same course
-      - duplicate (course, CLO_TEXT) rows (keep the highest similarity)
+      - duplicate (course, CLO_TEXT) rows (keep highest similarity)
     """
     base_course = df.loc[base_idx, COURSE_COL]
     base_level = parse_course_level(base_course)
@@ -141,11 +139,9 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
     for idx, course in df[COURSE_COL].items():
         # idx is 0..N-1 because of reset_index(drop=True)
         if course == base_course:
-            # skip CLOs from the same course
-            continue
+            continue  # skip same course
         if parse_course_level(course) != base_level:
-            # only same-level across ALL departments
-            continue
+            continue  # only same level
         comp_indices.append(idx)
 
     if not comp_indices:
@@ -178,15 +174,17 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
 
 def course_clo_options(course):
     """
-    Return list of {id, label} CLO options for a given course,
-    for the second dropdown.
+    Return list of {id, label} CLO options for a given course for dropdown.
+    Deduplicate CLO_TEXT within a course so you don't see the same text 10 times.
     """
     if not course:
         return []
-    subset = df[df[COURSE_COL] == course]
+    subset = df[df[COURSE_COL] == course].copy()
+    # Drop duplicate CLO_TEXT within this course, keep first occurrence
+    subset = subset.drop_duplicates(subset=["CLO_TEXT"])
     options = []
-    for idx, row in subset.iterrows():
-        label = shorten(row["CLO_TEXT"], width=120, placeholder="…")
+    for idx in subset.index:
+        label = shorten(subset.at[idx, "CLO_TEXT"], width=120, placeholder="…")
         options.append({"id": int(idx), "label": label})
     return options
 
@@ -298,18 +296,20 @@ def index():
         if not course_a:
             error = "Select a course."
         elif not clo_idx:
-            # User just changed course; we only needed to repopulate CLO dropdown.
-            # No error and no similarity calculations yet.
+            # User just changed course; only need to repopulate CLO dropdown.
             pass
         else:
-            base_idx = int(clo_idx)
-            # sanity check: ensure this CLO actually belongs to the selected course
-            if df.loc[base_idx, COURSE_COL] != course_a:
-                error = "Selected CLO does not belong to the chosen course."
-            else:
-                base_clo_text = df.loc[base_idx, "CLO_TEXT"]
-                course_level_results = course_vs_level_similarity(course_a)
-                clo_results = clo_vs_same_level_clos(base_idx)
+            try:
+                base_idx = int(clo_idx)
+                # sanity check: ensure this CLO actually belongs to the selected course
+                if df.loc[base_idx, COURSE_COL] != course_a:
+                    error = "Selected CLO does not belong to the chosen course."
+                else:
+                    base_clo_text = df.loc[base_idx, "CLO_TEXT"]
+                    course_level_results = course_vs_level_similarity(course_a)
+                    clo_results = clo_vs_same_level_clos(base_idx)
+            except (ValueError, KeyError, IndexError):
+                error = "Invalid CLO selection. Please choose again."
 
     return render_template_string(
         HTML,

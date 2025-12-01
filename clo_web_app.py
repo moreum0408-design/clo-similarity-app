@@ -87,9 +87,8 @@ def mean_vector(indices):
 
 def course_vs_level_similarity(course_a):
     """
-    Overall similarity: one course vs ALL same-level courses (e.g. any 8xx),
+    Overall similarity: one course vs ALL same-level courses (e.g. any 4xx or 8xx),
     regardless of department prefix.
-    Returns list of dicts sorted by similarity.
     """
     base_level = parse_course_level(course_a)
     if base_level is None:
@@ -124,9 +123,10 @@ def course_vs_level_similarity(course_a):
 
 def clo_vs_same_level_clos(base_idx, max_results=100):
     """
-    ONE CLO index vs ALL CLOs of all OTHER same-level courses (e.g. any 8xx),
-    excluding CLOs from its own course.
-    Returns list of dicts with course, clo_text, similarity.
+    ONE CLO index vs ALL CLOs of all OTHER same-level courses (e.g. any 4xx/8xx),
+    excluding:
+      - CLOs from the same course
+      - duplicate (course, CLO_TEXT) rows (keep the highest similarity)
     """
     base_course = df.loc[base_idx, COURSE_COL]
     base_level = parse_course_level(base_course)
@@ -137,9 +137,10 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
 
     comp_indices = []
     for idx, course in df[COURSE_COL].items():
-        if df.loc[idx, COURSE_COL] == base_course:
-            # skip CLOs from the same course
+        # skip all CLOs from the same course
+        if course == base_course:
             continue
+        # only same level across ALL departments
         if parse_course_level(course) != base_level:
             continue
         comp_indices.append(idx)
@@ -150,18 +151,26 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
     comp_mat = tfidf_matrix[comp_indices]             # M x D
     sims = cosine_similarity(base_vec, comp_mat)[0]   # length M
 
-    rows = []
-    for idx, sim in sorted(
-        zip(comp_indices, sims), key=lambda x: x[1], reverse=True
-    )[:max_results]:
-        rows.append(
+    # First build raw results
+    raw_rows = []
+    for idx, sim in zip(comp_indices, sims):
+        raw_rows.append(
             {
                 "course": df.loc[idx, COURSE_COL],
                 "clo_text": df.loc[idx, "CLO_TEXT"],
                 "similarity": float(sim),
             }
         )
-    return rows
+
+    # Deduplicate: keep only the highest similarity per (course, clo_text)
+    best_by_key = {}
+    for r in raw_rows:
+        key = (r["course"], r["clo_text"])
+        if key not in best_by_key or r["similarity"] > best_by_key[key]["similarity"]:
+            best_by_key[key] = r
+
+    rows = sorted(best_by_key.values(), key=lambda x: x["similarity"], reverse=True)
+    return rows[:max_results]
 
 
 def course_clo_options(course):
@@ -250,7 +259,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if clo_results %}
 <div class="result">
-    <h2>This CLO vs All CLOs in Same-Level Courses (all departments)</h2>
+    <h2>This CLO vs All CLOs in Same-Level Courses (other courses only)</h2>
     <table>
         <tr><th>Course</th><th>CLO</th><th>Similarity</th></tr>
         {% for r in clo_results %}

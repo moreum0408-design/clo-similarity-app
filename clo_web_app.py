@@ -25,13 +25,12 @@ if not os.path.exists(DATA_FILE):
 
 df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME)
 
-# required columns except for course name (we'll handle Course/COURSE flexibly)
 required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
 for col in required_cols:
     if col not in df.columns:
         raise ValueError(f"Missing column: {col}")
 
-# detect COURSE column name (Course vs COURSE)
+# handle Course / COURSE flexibly
 if "COURSE" in df.columns:
     COURSE_COL = "COURSE"
 elif "Course" in df.columns:
@@ -45,85 +44,23 @@ df["Program"] = df["Program"].astype(str)
 
 COURSES = sorted(df[COURSE_COL].unique())
 
-
-def build_clo_label(row, max_len=90):
-    base = f"{row[COURSE_COL]} – {row['CLO_TEXT']}"
-    return shorten(base, width=max_len, placeholder="…")
-
-
-CLO_OPTIONS = [
-    {"id": int(idx), "label": build_clo_label(row)}
-    for idx, row in df.iterrows()
-]
-
 # ---------------------------------------------------------
-# TF-IDF (scikit-learn)
+# TF-IDF (computed ONCE at startup)
 # ---------------------------------------------------------
 vectorizer = TfidfVectorizer()
-tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse matrix (N, features)
+tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse (N, D)
 
 # ---------------------------------------------------------
-# Similarity Functions
+# Helper structures
 # ---------------------------------------------------------
-def cosine_sim_rows(i, j):
-    v1 = tfidf_matrix[i]
-    v2 = tfidf_matrix[j]
-    return float(cosine_similarity(v1, v2)[0, 0])
-
-
 COURSE_TO_ROWS = defaultdict(list)
 for idx, row in df.iterrows():
     COURSE_TO_ROWS[row[COURSE_COL]].append(int(idx))
 
 
-def mean_vector(indices):
+def parse_course_prefix_and_level(course_code: str):
     """
-    Return a 1xD ndarray representing the mean TF-IDF vector for the given
-    row indices. Converts from np.matrix to ndarray explicitly.
-    """
-    if not indices:
-        return None
-    sub = tfidf_matrix[indices]
-    arr = np.asarray(sub.mean(axis=0)).ravel()
-    return arr.reshape(1, -1)
-
-
-def course_vs_course_similarity(course_a, course_b):
-    idx_a = COURSE_TO_ROWS.get(course_a, [])
-    idx_b = COURSE_TO_ROWS.get(course_b, [])
-
-    if not idx_a or not idx_b:
-        return None
-
-    mean_a = mean_vector(idx_a)
-    mean_b = mean_vector(idx_b)
-    if mean_a is None or mean_b is None:
-        return None
-
-    overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
-
-    sim_matrix = cosine_similarity(tfidf_matrix[idx_a], tfidf_matrix[idx_b])
-
-    details = []
-    for i_local, i_global in enumerate(idx_a):
-        best_j_local = sim_matrix[i_local].argmax()
-        best_j_global = idx_b[best_j_local]
-        best_sim = sim_matrix[i_local][best_j_local]
-
-        details.append(
-            {
-                "clo_a": df.loc[i_global, "CLO_TEXT"],
-                "clo_b": df.loc[best_j_global, "CLO_TEXT"],
-                "similarity": float(best_sim),
-            }
-        )
-
-    return {"overall": overall, "details": details}
-
-
-def parse_course_prefix_and_level(course_code):
-    """
-    From e.g. 'CJUS 788' get ('CJUS', 700).
+    From e.g. 'CJUS 887' -> ('CJUS', 800)
     """
     if not course_code:
         return None, None
@@ -138,40 +75,105 @@ def parse_course_prefix_and_level(course_code):
     return prefix, level
 
 
+def mean_vector(indices):
+    """1 x D ndarray mean TF-IDF vector for given row indices."""
+    if not indices:
+        return None
+    sub = tfidf_matrix[indices]
+    arr = np.asarray(sub.mean(axis=0)).ravel()
+    return arr.reshape(1, -1)
+
+
 def course_vs_level_similarity(course_a):
     """
-    Compare one course vs ALL courses of same prefix + level (e.g. CJUS 7xx).
-    Returns list of dicts sorted by overall similarity.
+    Overall similarity: one course vs ALL same-prefix, same-level courses.
+    Returns list of dicts sorted by similarity.
     """
     prefix, level = parse_course_prefix_and_level(course_a)
     if prefix is None or level is None:
         return []
 
-    candidates = []
+    idx_a = COURSE_TO_ROWS.get(course_a, [])
+    if not idx_a:
+        return []
+
+    mean_a = mean_vector(idx_a)
+    if mean_a is None:
+        return []
+
+    results = []
     for c in COURSES:
         if c == course_a:
             continue
         p2, l2 = parse_course_prefix_and_level(c)
         if p2 == prefix and l2 == level:
-            sim = course_vs_course_similarity(course_a, c)
-            if sim is not None:
-                candidates.append(
-                    {
-                        "course_b": c,
-                        "overall": sim["overall"],
-                    }
-                )
+            idx_b = COURSE_TO_ROWS.get(c, [])
+            if not idx_b:
+                continue
+            mean_b = mean_vector(idx_b)
+            if mean_b is None:
+                continue
+            overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
+            results.append({"course_b": c, "overall": overall})
 
-    candidates.sort(key=lambda x: x["overall"], reverse=True)
-    return candidates
+    results.sort(key=lambda x: x["overall"], reverse=True)
+    return results
 
 
-def get_course_clos(course):
-    """Return list of CLO texts for a given course."""
+def clo_vs_same_level_clos(base_idx, max_results=100):
+    """
+    ONE CLO index vs ALL CLOs of all other same-level courses.
+    Returns list of dicts with course, clo_text, similarity.
+    """
+    base_course = df.loc[base_idx, COURSE_COL]
+    prefix, level = parse_course_prefix_and_level(base_course)
+    if prefix is None or level is None:
+        return []
+
+    base_vec = tfidf_matrix[base_idx]  # 1 x D
+
+    comp_indices = []
+    for idx, course in df[COURSE_COL].items():
+        if idx == base_idx:
+            continue
+        p2, l2 = parse_course_prefix_and_level(course)
+        if p2 == prefix and l2 == level:
+            comp_indices.append(idx)
+
+    if not comp_indices:
+        return []
+
+    comp_mat = tfidf_matrix[comp_indices]          # M x D
+    sims = cosine_similarity(base_vec, comp_mat)[0]  # length M
+
+    rows = []
+    for idx, sim in sorted(
+        zip(comp_indices, sims), key=lambda x: x[1], reverse=True
+    )[:max_results]:
+        rows.append(
+            {
+                "course": df.loc[idx, COURSE_COL],
+                "clo_text": df.loc[idx, "CLO_TEXT"],
+                "similarity": float(sim),
+            }
+        )
+    return rows
+
+
+def course_clo_options(course):
+    """
+    Return list of {id, label} CLO options for a given course,
+    for the second dropdown.
+    """
     if not course:
         return []
-    rows = df[df[COURSE_COL] == course]["CLO_TEXT"]
-    return rows.tolist()
+    subset = df[df[COURSE_COL] == course]
+    options = []
+    for idx, row in subset.iterrows():
+        label = shorten(row["CLO_TEXT"], width=120, placeholder="…")
+        options.append({"id": int(idx), "label": label})
+    return options
+
 
 # ---------------------------------------------------------
 # FLASK APP
@@ -194,46 +196,23 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 <h1>CLO Similarity Tool</h1>
 
 <form method="post">
-    <p><strong>Choose mode:</strong></p>
-    <label><input type="radio" name="mode" value="course" {% if mode=='course' %}checked{% endif %}> Course vs Course</label><br>
-    <label><input type="radio" name="mode" value="course_level" {% if mode=='course_level' %}checked{% endif %}> Course vs Same-Level</label><br>
-    <label><input type="radio" name="mode" value="clo" {% if mode=='clo' %}checked{% endif %}> CLO vs CLO</label>
+    <p><strong>Select a course and one CLO from that course.</strong></p>
 
-    {% if mode != 'clo' %}
-        <p>Course A:</p>
-        <select name="course_a">
-            <option value="">-- select --</option>
-            {% for c in courses %}
-                <option value="{{c}}" {% if course_a==c %}selected{% endif %}>{{c}}</option>
-            {% endfor %}
-        </select>
+    <p>Course:</p>
+    <select name="course_a">
+        <option value="">-- select course --</option>
+        {% for c in courses %}
+            <option value="{{c}}" {% if course_a==c %}selected{% endif %}>{{c}}</option>
+        {% endfor %}
+    </select>
 
-        {% if mode=='course' %}
-            <p>Course B:</p>
-            <select name="course_b">
-                <option value="">-- select --</option>
-                {% for c in courses %}
-                    <option value="{{c}}" {% if course_b==c %}selected{% endif %}>{{c}}</option>
-                {% endfor %}
-            </select>
-        {% endif %}
-    {% else %}
-        <p>CLO A:</p>
-        <select name="clo_a">
-            <option value="">-- select --</option>
-            {% for clo in clos %}
-                <option value="{{clo.id}}" {% if clo_a==clo.id|string %}selected{% endif %}>{{clo.label}}</option>
-            {% endfor %}
-        </select>
-
-        <p>CLO B:</p>
-        <select name="clo_b">
-            <option value="">-- select --</option>
-            {% for clo in clos %}
-                <option value="{{clo.id}}" {% if clo_b==clo.id|string %}selected{% endif %}>{{clo.label}}</option>
-            {% endfor %}
-        </select>
-    {% endif %}
+    <p>CLO (from selected course):</p>
+    <select name="clo_idx">
+        <option value="">{% if not course_a %}-- select course first --{% else %}-- select CLO --{% endif %}</option>
+        {% for clo in course_clos %}
+            <option value="{{clo.id}}" {% if clo_idx==clo.id|string %}selected{% endif %}>{{clo.label}}</option>
+        {% endfor %}
+    </select>
 
     <p><input type="submit" value="Compare"></p>
 </form>
@@ -242,38 +221,20 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 <div class="result"><strong>Error:</strong> {{error}}</div>
 {% endif %}
 
-{% if course_result %}
+{% if base_clo_text %}
 <div class="result">
-    <h2>Course vs Course</h2>
-    <p>Overall similarity: <span class="sim">{{course_result.overall|round(3)}}</span></p>
-    <table>
-        <tr><th>CLO A</th><th>CLO B</th><th>Similarity</th></tr>
-        {% for row in course_result.details %}
-        <tr>
-            <td>{{row.clo_a}}</td>
-            <td>{{row.clo_b}}</td>
-            <td class="sim">{{row.similarity|round(3)}}</td>
-        </tr>
-        {% endfor %}
-    </table>
+    <h2>Selected CLO</h2>
+    <p><strong>Course:</strong> {{ course_a }}</p>
+    <p><strong>CLO:</strong> {{ base_clo_text }}</p>
 </div>
 {% endif %}
 
-{% if level_results %}
+{% if course_level_results %}
 <div class="result">
-    <h2>Course vs Same Level</h2>
-
-    <p><strong>CLOs for {{ course_a }}</strong></p>
-    <ul>
-        {% for clo_text in base_course_clos %}
-            <li>{{ clo_text }}</li>
-        {% endfor %}
-    </ul>
-
-    <h3>Similarity to other same-level courses</h3>
+    <h2>Overall Course vs Same-Level Courses</h2>
     <table>
         <tr><th>Course</th><th>Overall Similarity</th></tr>
-        {% for r in level_results %}
+        {% for r in course_level_results %}
         <tr>
             <td>{{ r.course_b }}</td>
             <td class="sim">{{ r.overall|round(3) }}</td>
@@ -283,12 +244,19 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 </div>
 {% endif %}
 
-{% if clo_sim is not none %}
+{% if clo_results %}
 <div class="result">
-    <h2>CLO vs CLO</h2>
-    <p><strong>{{clo_a_text}}</strong></p>
-    <p><strong>{{clo_b_text}}</strong></p>
-    <p>Similarity: <span class="sim">{{clo_sim|round(3)}}</span></p>
+    <h2>This CLO vs All CLOs in Same-Level Courses</h2>
+    <table>
+        <tr><th>Course</th><th>CLO</th><th>Similarity</th></tr>
+        {% for r in clo_results %}
+        <tr>
+            <td>{{ r.course }}</td>
+            <td>{{ r.clo_text }}</td>
+            <td class="sim">{{ r.similarity|round(3) }}</td>
+        </tr>
+        {% endfor %}
+    </table>
 </div>
 {% endif %}
 
@@ -299,64 +267,42 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    mode = request.form.get("mode", "course")
     course_a = request.form.get("course_a", "")
-    course_b = request.form.get("course_b", "")
-    clo_a = request.form.get("clo_a", "")
-    clo_b = request.form.get("clo_b", "")
+    clo_idx = request.form.get("clo_idx", "")
 
     error = None
-    course_result = None
-    level_results = None
-    clo_sim = None
-    clo_a_text = ""
-    clo_b_text = ""
-    base_course_clos = []
+    base_clo_text = ""
+    course_level_results = []
+    clo_results = []
+
+    # CLO dropdown options depend on selected course
+    course_clos = course_clo_options(course_a)
 
     if request.method == "POST":
-        if mode == "course":
-            if not course_a or not course_b:
-                error = "Select both courses."
-            elif course_a == course_b:
-                error = "Choose two different courses."
+        if not course_a:
+            error = "Select a course."
+        elif not clo_idx:
+            error = "Select a CLO from the course."
+        else:
+            base_idx = int(clo_idx)
+            # sanity check: ensure this CLO actually belongs to the selected course
+            if df.loc[base_idx, COURSE_COL] != course_a:
+                error = "Selected CLO does not belong to the chosen course."
             else:
-                course_result = course_vs_course_similarity(course_a, course_b)
-
-        elif mode == "course_level":
-            if not course_a:
-                error = "Select a course."
-            else:
-                level_results = course_vs_level_similarity(course_a)
-                base_course_clos = get_course_clos(course_a)
-
-        elif mode == "clo":
-            if not clo_a or not clo_b:
-                error = "Select both CLOs."
-            elif clo_a == clo_b:
-                error = "Choose two different CLOs."
-            else:
-                idx_a = int(clo_a)
-                idx_b = int(clo_b)
-                clo_a_text = df.loc[idx_a, "CLO_TEXT"]
-                clo_b_text = df.loc[idx_b, "CLO_TEXT"]
-                clo_sim = cosine_sim_rows(idx_a, idx_b)
+                base_clo_text = df.loc[base_idx, "CLO_TEXT"]
+                course_level_results = course_vs_level_similarity(course_a)
+                clo_results = clo_vs_same_level_clos(base_idx)
 
     return render_template_string(
         HTML,
-        mode=mode,
         courses=COURSES,
-        clos=CLO_OPTIONS,
         course_a=course_a,
-        course_b=course_b,
-        clo_a=clo_a,
-        clo_b=clo_b,
-        course_result=course_result,
-        level_results=level_results,
-        clo_sim=clo_sim,
-        clo_a_text=clo_a_text,
-        clo_b_text=clo_b_text,
+        clo_idx=clo_idx,
+        course_clos=course_clos,
         error=error,
-        base_course_clos=base_course_clos,
+        base_clo_text=base_clo_text,
+        course_level_results=course_level_results,
+        clo_results=clo_results,
     )
 
 

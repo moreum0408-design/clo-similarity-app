@@ -58,21 +58,22 @@ for idx, row in df.iterrows():
     COURSE_TO_ROWS[row[COURSE_COL]].append(int(idx))
 
 
-def parse_course_prefix_and_level(course_code: str):
+def parse_course_level(course_code: str):
     """
-    From e.g. 'CJUS 887' -> ('CJUS', 800)
+    From e.g. 'CJUS 887' -> 800
+    Only uses the first digit of the numeric part (hundreds level),
+    ignores department prefix entirely.
     """
     if not course_code:
-        return None, None
+        return None
     code = course_code.replace(" ", "")
-    m_pre = re.match(r"^([A-Za-z]+)", code)
-    prefix = m_pre.group(1) if m_pre else None
-    m_num = re.search(r"(\d+)", code)
-    if not m_num:
-        return prefix, None
-    num = m_num.group(1)
-    level = int(num[0]) * 100
-    return prefix, level
+    m = re.search(r"(\d+)", code)
+    if not m:
+        return None
+    num = m.group(1)
+    if not num or not num[0].isdigit():
+        return None
+    return int(num[0]) * 100
 
 
 def mean_vector(indices):
@@ -86,11 +87,12 @@ def mean_vector(indices):
 
 def course_vs_level_similarity(course_a):
     """
-    Overall similarity: one course vs ALL same-prefix, same-level courses.
+    Overall similarity: one course vs ALL same-level courses (e.g. any 8xx),
+    regardless of department prefix.
     Returns list of dicts sorted by similarity.
     """
-    prefix, level = parse_course_prefix_and_level(course_a)
-    if prefix is None or level is None:
+    base_level = parse_course_level(course_a)
+    if base_level is None:
         return []
 
     idx_a = COURSE_TO_ROWS.get(course_a, [])
@@ -105,16 +107,16 @@ def course_vs_level_similarity(course_a):
     for c in COURSES:
         if c == course_a:
             continue
-        p2, l2 = parse_course_prefix_and_level(c)
-        if p2 == prefix and l2 == level:
-            idx_b = COURSE_TO_ROWS.get(c, [])
-            if not idx_b:
-                continue
-            mean_b = mean_vector(idx_b)
-            if mean_b is None:
-                continue
-            overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
-            results.append({"course_b": c, "overall": overall})
+        if parse_course_level(c) != base_level:
+            continue
+        idx_b = COURSE_TO_ROWS.get(c, [])
+        if not idx_b:
+            continue
+        mean_b = mean_vector(idx_b)
+        if mean_b is None:
+            continue
+        overall = float(cosine_similarity(mean_a, mean_b)[0, 0])
+        results.append({"course_b": c, "overall": overall})
 
     results.sort(key=lambda x: x["overall"], reverse=True)
     return results
@@ -122,29 +124,31 @@ def course_vs_level_similarity(course_a):
 
 def clo_vs_same_level_clos(base_idx, max_results=100):
     """
-    ONE CLO index vs ALL CLOs of all other same-level courses.
+    ONE CLO index vs ALL CLOs of all OTHER same-level courses (e.g. any 8xx),
+    excluding CLOs from its own course.
     Returns list of dicts with course, clo_text, similarity.
     """
     base_course = df.loc[base_idx, COURSE_COL]
-    prefix, level = parse_course_prefix_and_level(base_course)
-    if prefix is None or level is None:
+    base_level = parse_course_level(base_course)
+    if base_level is None:
         return []
 
     base_vec = tfidf_matrix[base_idx]  # 1 x D
 
     comp_indices = []
     for idx, course in df[COURSE_COL].items():
-        if idx == base_idx:
+        if df.loc[idx, COURSE_COL] == base_course:
+            # skip CLOs from the same course
             continue
-        p2, l2 = parse_course_prefix_and_level(course)
-        if p2 == prefix and l2 == level:
-            comp_indices.append(idx)
+        if parse_course_level(course) != base_level:
+            continue
+        comp_indices.append(idx)
 
     if not comp_indices:
         return []
 
-    comp_mat = tfidf_matrix[comp_indices]          # M x D
-    sims = cosine_similarity(base_vec, comp_mat)[0]  # length M
+    comp_mat = tfidf_matrix[comp_indices]             # M x D
+    sims = cosine_similarity(base_vec, comp_mat)[0]   # length M
 
     rows = []
     for idx, sim in sorted(
@@ -199,7 +203,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
     <p><strong>Select a course and one CLO from that course.</strong></p>
 
     <p>Course:</p>
-    <select name="course_a">
+    <select name="course_a" onchange="this.form.submit()">
         <option value="">-- select course --</option>
         {% for c in courses %}
             <option value="{{c}}" {% if course_a==c %}selected{% endif %}>{{c}}</option>
@@ -231,7 +235,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if course_level_results %}
 <div class="result">
-    <h2>Overall Course vs Same-Level Courses</h2>
+    <h2>Overall Course vs Same-Level Courses (all departments)</h2>
     <table>
         <tr><th>Course</th><th>Overall Similarity</th></tr>
         {% for r in course_level_results %}
@@ -246,7 +250,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if clo_results %}
 <div class="result">
-    <h2>This CLO vs All CLOs in Same-Level Courses</h2>
+    <h2>This CLO vs All CLOs in Same-Level Courses (all departments)</h2>
     <table>
         <tr><th>Course</th><th>CLO</th><th>Similarity</th></tr>
         {% for r in clo_results %}
@@ -282,7 +286,9 @@ def index():
         if not course_a:
             error = "Select a course."
         elif not clo_idx:
-            error = "Select a CLO from the course."
+            # User just changed course; we only needed to repopulate CLO dropdown.
+            # No error and no similarity calculations yet.
+            pass
         else:
             base_idx = int(clo_idx)
             # sanity check: ensure this CLO actually belongs to the selected course

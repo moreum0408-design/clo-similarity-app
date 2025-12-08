@@ -23,7 +23,7 @@ if not os.path.exists(DATA_FILE):
         f"Could not find {DATA_FILE}. Put it in the same folder as clo_web_app.py."
     )
 
-# IMPORTANT: ensure index is 0..N-1 so indices == TF-IDF row numbers
+# Ensure index is 0..N-1 so indices == TF-IDF row numbers
 df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME).reset_index(drop=True)
 
 required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
@@ -180,7 +180,6 @@ def course_clo_options(course):
     if not course:
         return []
     subset = df[df[COURSE_COL] == course].copy()
-    # Drop duplicate CLO_TEXT within this course, keep first occurrence
     subset = subset.drop_duplicates(subset=["CLO_TEXT"])
     options = []
     for idx in subset.index:
@@ -281,6 +280,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 @app.route("/", methods=["GET", "POST"])
 def index():
+    # Default values
     course_a = request.form.get("course_a", "")
     clo_idx = request.form.get("clo_idx", "")
 
@@ -289,27 +289,32 @@ def index():
     course_level_results = []
     clo_results = []
 
-    # CLO dropdown options depend on selected course
-    course_clos = course_clo_options(course_a)
+    try:
+        # CLO dropdown options depend on selected course
+        course_clos = course_clo_options(course_a)
 
-    if request.method == "POST":
-        if not course_a:
-            error = "Select a course."
-        elif not clo_idx:
-            # User just changed course; only need to repopulate CLO dropdown.
-            pass
-        else:
-            try:
+        if request.method == "POST":
+            if not course_a:
+                error = "Select a course."
+            elif not clo_idx:
+                # User just changed course; only need to repopulate CLO dropdown.
+                pass
+            else:
                 base_idx = int(clo_idx)
                 # sanity check: ensure this CLO actually belongs to the selected course
-                if df.loc[base_idx, COURSE_COL] != course_a:
+                if base_idx < 0 or base_idx >= len(df):
+                    error = "Invalid CLO selection. Please choose again."
+                elif df.loc[base_idx, COURSE_COL] != course_a:
                     error = "Selected CLO does not belong to the chosen course."
                 else:
                     base_clo_text = df.loc[base_idx, "CLO_TEXT"]
                     course_level_results = course_vs_level_similarity(course_a)
                     clo_results = clo_vs_same_level_clos(base_idx)
-            except (ValueError, KeyError, IndexError):
-                error = "Invalid CLO selection. Please choose again."
+
+    except Exception as e:
+        # Catch ANY unexpected error and show it instead of 502
+        error = f"Unexpected error: {type(e).__name__}: {e}"
+        course_clos = course_clo_options(course_a)
 
     return render_template_string(
         HTML,

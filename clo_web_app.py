@@ -11,6 +11,9 @@ SHEET_NAME = "All CLOs_data (1)"
 COURSE_SIM_FILE = "course_similarity_top.csv"
 CLO_SIM_FILE = "clo_similarity_top.csv"
 
+DISPLAY_TOP = 25  # target number of rows to display
+
+
 # ---------- Load Excel ----------
 if not os.path.exists(DATA_FILE):
     raise FileNotFoundError(f"{DATA_FILE} not found in project folder.")
@@ -62,7 +65,7 @@ def course_vs_level_from_csv(course_a):
         for _, row in subset.iterrows()
     ]
 
-    # group by similarity (rounded to 3 decimals) and join duplicate courses
+    # group by similarity (rounded) and join duplicate courses
     groups = defaultdict(list)
     for r in raw:
         key = round(r["overall"], 3)
@@ -72,7 +75,9 @@ def course_vs_level_from_csv(course_a):
     for sim in sorted(groups.keys(), reverse=True):
         courses_str = " / ".join(sorted(set(groups[sim])))
         rows.append({"courses": courses_str, "overall": sim})
-    return rows
+
+    # ensure we only show top 25 grouped rows
+    return rows[:DISPLAY_TOP]
 
 
 def clo_vs_level_from_csv(base_idx):
@@ -113,7 +118,9 @@ def clo_vs_level_from_csv(base_idx):
         )
 
     rows.sort(key=lambda x: x["similarity"], reverse=True)
-    return rows
+
+    # show top 25 grouped rows
+    return rows[:DISPLAY_TOP]
 
 
 # ---------- Flask app ----------
@@ -170,7 +177,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if course_level_results %}
 <div class="result">
-    <h2>Overall Course vs Same-Level Courses (grouped)</h2>
+    <h2>Overall Course vs Same-Level Courses (grouped, top {{ course_level_results|length }})</h2>
     <table>
         <tr><th>Course(s)</th><th>Overall Similarity</th></tr>
         {% for r in course_level_results %}
@@ -185,7 +192,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if clo_results %}
 <div class="result">
-    <h2>This CLO vs CLOs in Same-Level Courses (grouped)</h2>
+    <h2>This CLO vs CLOs in Same-Level Courses (grouped, top {{ clo_results|length }})</h2>
     <table>
         <tr><th>Course(s)</th><th>CLO</th><th>Similarity</th></tr>
         {% for r in clo_results %}

@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import normalize
 
 # ---------------------------------------------------------
 # CONFIG
@@ -51,6 +52,9 @@ COURSES = sorted(df[COURSE_COL].unique())
 vectorizer = TfidfVectorizer()
 tfidf_matrix = vectorizer.fit_transform(df["CLO_TEXT"])  # sparse (N, D)
 
+# L2-normalize each row ONCE so cosine similarity = dot product
+norm_tfidf = normalize(tfidf_matrix, norm="l2", axis=1)
+
 # ---------------------------------------------------------
 # Helper structures
 # ---------------------------------------------------------
@@ -77,20 +81,21 @@ def parse_course_level(course_code: str):
 
 
 def mean_vector(indices):
-    """Return 1 x D ndarray mean TF-IDF vector for given row indices."""
+    """Return 1 x D dense ndarray mean vector for given row indices."""
     if not indices:
         return None
-    sub = tfidf_matrix[indices]
+    sub = norm_tfidf[indices]  # still sparse
     arr = np.asarray(sub.mean(axis=0)).ravel()
     return arr.reshape(1, -1)
 
 
-def course_vs_level_similarity(course_a, top_n=30):
+def course_vs_level_similarity(course_a, top_n=20):
     """
     Overall similarity: one course vs ALL same-level courses (e.g. any 4xx/6xx/8xx),
     regardless of department prefix.
 
-    Returns list of dicts sorted by similarity, truncated to top_n.
+    Uses dense 1xD mean vectors but only once per pair.
+    Returns top_n courses.
     """
     base_level = parse_course_level(course_a)
     if base_level is None:
@@ -128,8 +133,8 @@ def course_vs_level_similarity(course_a, top_n=30):
 def clo_vs_same_level_clos(
     base_idx,
     course_level_results,
-    max_results=30,
-    use_top_k_courses=30,
+    max_results=20,
+    use_top_k_courses=20,
 ):
     """
     ONE CLO index vs CLOs from the TOP-K most similar same-level courses.
@@ -137,14 +142,14 @@ def clo_vs_same_level_clos(
     - Only uses courses in course_level_results[:use_top_k_courses]
     - Excludes all CLOs from the same course
     - Deduplicates (course, CLO_TEXT), keeping highest similarity
-    - Returns at most max_results rows
+    - Uses sparse dot product with pre-normalized TF-IDF to stay light
     """
     base_course = df.loc[base_idx, COURSE_COL]
     base_level = parse_course_level(base_course)
     if base_level is None:
         return []
 
-    base_vec = tfidf_matrix[base_idx]  # 1 x D
+    base_vec = norm_tfidf[base_idx]  # 1 x D, sparse and normalized
 
     # Restrict to CLOs from top-K same-level courses (other than base course)
     allowed_courses_list = [
@@ -168,8 +173,10 @@ def clo_vs_same_level_clos(
     if not comp_indices:
         return []
 
-    comp_mat = tfidf_matrix[comp_indices]            # M x D
-    sims = cosine_similarity(base_vec, comp_mat)[0]  # length M
+    comp_mat = norm_tfidf[comp_indices]            # M x D sparse, normalized
+    # cosine similarity = dot product of normalized rows
+    sims_sparse = base_vec.dot(comp_mat.T)         # 1 x M sparse
+    sims = np.asarray(sims_sparse.todense()).ravel()  # dense 1D of length M
 
     raw_rows = []
     for idx, sim in zip(comp_indices, sims):
@@ -264,7 +271,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if course_level_results %}
 <div class="result">
-    <h2>Overall Course vs Same-Level Courses (top 30)</h2>
+    <h2>Overall Course vs Same-Level Courses (top 20)</h2>
     <table>
         <tr><th>Course</th><th>Overall Similarity</th></tr>
         {% for r in course_level_results %}
@@ -279,7 +286,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if clo_results %}
 <div class="result">
-    <h2>This CLO vs CLOs in Top Similar Same-Level Courses (top 30)</h2>
+    <h2>This CLO vs CLOs in Top Similar Same-Level Courses (top 20)</h2>
     <p><em>Compared against CLOs in the most similar same-level courses (other courses only).</em></p>
     <table>
         <tr><th>Course</th><th>CLO</th><th>Similarity</th></tr>
@@ -327,12 +334,12 @@ def index():
                     error = "Selected CLO does not belong to the chosen course."
                 else:
                     base_clo_text = df.loc[base_idx, "CLO_TEXT"]
-                    course_level_results = course_vs_level_similarity(course_a, top_n=30)
+                    course_level_results = course_vs_level_similarity(course_a, top_n=20)
                     clo_results = clo_vs_same_level_clos(
                         base_idx,
                         course_level_results,
-                        max_results=30,
-                        use_top_k_courses=30,
+                        max_results=20,
+                        use_top_k_courses=20,
                     )
             except (ValueError, KeyError, IndexError) as e:
                 error = f"Invalid CLO selection: {e}"

@@ -10,9 +10,10 @@ from sklearn.preprocessing import normalize
 DATA_FILE = "All CLOs copy.xlsx"
 SHEET_NAME = "All CLOs_data (1)"
 
-TOP_COURSE = 20   # top courses per course
-TOP_CLO = 25      # top CLOs per CLO (we bump this to 25)
-HASH_DIM = 4096   # keeps RAM low
+DISPLAY_TOP = 25       # how many grouped rows we eventually want
+RAW_TOP_COURSE = 60    # raw courses per course to store
+RAW_TOP_CLO = 60       # raw CLO matches per CLO to store
+HASH_DIM = 4096        # keeps RAM low
 
 
 def parse_course_level(code):
@@ -88,7 +89,7 @@ def main():
             sims.append((course_b, sim))
 
         sims.sort(key=lambda x: x[1], reverse=True)
-        for course_b, sim in sims[:TOP_COURSE]:
+        for course_b, sim in sims[:RAW_TOP_COURSE]:
             course_rows.append(
                 {"base_course": course_a, "other_course": course_b, "overall": sim}
             )
@@ -98,7 +99,7 @@ def main():
     print(f"Saved course_similarity_top.csv ({len(course_sim_df)} rows)")
 
     # ---------- CLO vs CLO ----------
-    print("Computing CLO–CLO similarities (top 25 per CLO)...")
+    print(f"Computing CLO–CLO similarities (top {RAW_TOP_CLO} raw per CLO)...")
     clo_rows = []
 
     for base_idx in range(n):
@@ -116,14 +117,13 @@ def main():
 
         top_courses = (
             subset.sort_values("overall", ascending=False)["other_course"]
-            .head(TOP_COURSE)
             .tolist()
         )
         allowed_courses = set(top_courses)
         if not allowed_courses:
             continue
 
-        # all candidate CLO indices from those courses
+        # all candidate CLO indices from those (already-similar) courses
         cand_indices = [
             i for i, c in df[course_col].items() if c in allowed_courses
         ]
@@ -138,7 +138,7 @@ def main():
 
         pairs = list(zip(cand_indices, sims))
         pairs.sort(key=lambda x: x[1], reverse=True)
-        for other_idx, sim in pairs[:TOP_CLO]:
+        for other_idx, sim in pairs[:RAW_TOP_CLO]:
             clo_rows.append(
                 {
                     "base_idx": base_idx,

@@ -11,7 +11,7 @@ DATA_FILE = "All CLOs copy.xlsx"
 SHEET_NAME = "All CLOs_data (1)"
 
 TOP_COURSE = 20   # top courses per course
-TOP_CLO = 10      # top CLOs per CLO (kept small so CSV < 25MB)
+TOP_CLO = 25      # top CLOs per CLO (we bump this to 25)
 HASH_DIM = 4096   # keeps RAM low
 
 
@@ -52,7 +52,7 @@ def main():
         norm=None,
     )
     X = hv.transform(df["CLO_TEXT"])
-    X = normalize(X, axis=1)  # each row len 1
+    X = normalize(X, axis=1)  # each row length 1
 
     # group indices by course
     course_to_rows = defaultdict(list)
@@ -84,7 +84,7 @@ def main():
                 continue
             mean_b = X[idx_b].mean(axis=0)
             mean_b_vec = np.asarray(mean_b).ravel()
-            sim = float(mean_a_vec @ mean_b_vec)
+            sim = float(mean_a_vec.dot(mean_b_vec))
             sims.append((course_b, sim))
 
         sims.sort(key=lambda x: x[1], reverse=True)
@@ -98,10 +98,9 @@ def main():
     print(f"Saved course_similarity_top.csv ({len(course_sim_df)} rows)")
 
     # ---------- CLO vs CLO ----------
-    print("Computing CLO–CLO similarities (top 10) ...")
+    print("Computing CLO–CLO similarities (top 25 per CLO)...")
     clo_rows = []
 
-    # quick lookup of top same-level courses
     for base_idx in range(n):
         if base_idx % 1000 == 0:
             print(f"  CLO {base_idx}/{n}")

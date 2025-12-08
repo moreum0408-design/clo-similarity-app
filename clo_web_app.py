@@ -23,7 +23,7 @@ if not os.path.exists(DATA_FILE):
         f"Could not find {DATA_FILE}. Put it in the same folder as clo_web_app.py."
     )
 
-# Ensure index is 0..N-1 so indices == TF-IDF row numbers
+# Force 0..N-1 index so DataFrame index == TF-IDF row number
 df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME).reset_index(drop=True)
 
 required_cols = ["COLLEGE", "Program", "CLO_TEXT"]
@@ -85,10 +85,12 @@ def mean_vector(indices):
     return arr.reshape(1, -1)
 
 
-def course_vs_level_similarity(course_a):
+def course_vs_level_similarity(course_a, top_n=30):
     """
     Overall similarity: one course vs ALL same-level courses (e.g. any 4xx/6xx/8xx),
     regardless of department prefix.
+
+    Returns list of dicts sorted by similarity, truncated to top_n.
     """
     base_level = parse_course_level(course_a)
     if base_level is None:
@@ -118,15 +120,24 @@ def course_vs_level_similarity(course_a):
         results.append({"course_b": c, "overall": overall})
 
     results.sort(key=lambda x: x["overall"], reverse=True)
+    if top_n is not None:
+        return results[:top_n]
     return results
 
 
-def clo_vs_same_level_clos(base_idx, max_results=100):
+def clo_vs_same_level_clos(
+    base_idx,
+    course_level_results,
+    max_results=30,
+    use_top_k_courses=30,
+):
     """
-    ONE CLO index vs ALL CLOs of all OTHER same-level courses
-    (e.g. any 4xx/6xx/8xx), excluding:
-      - CLOs from the same course
-      - duplicate (course, CLO_TEXT) rows (keep highest similarity)
+    ONE CLO index vs CLOs from the TOP-K most similar same-level courses.
+
+    - Only uses courses in course_level_results[:use_top_k_courses]
+    - Excludes all CLOs from the same course
+    - Deduplicates (course, CLO_TEXT), keeping highest similarity
+    - Returns at most max_results rows
     """
     base_course = df.loc[base_idx, COURSE_COL]
     base_level = parse_course_level(base_course)
@@ -135,22 +146,31 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
 
     base_vec = tfidf_matrix[base_idx]  # 1 x D
 
-    comp_indices = []
-    for idx, course in df[COURSE_COL].items():
-        # idx is 0..N-1 because of reset_index(drop=True)
-        if course == base_course:
-            continue  # skip same course
-        if parse_course_level(course) != base_level:
-            continue  # only same level
-        comp_indices.append(idx)
+    # Restrict to CLOs from top-K same-level courses (other than base course)
+    allowed_courses_list = [
+        r["course_b"]
+        for r in (course_level_results or [])
+        if r["course_b"] != base_course
+    ]
+    if use_top_k_courses is not None:
+        allowed_courses_list = allowed_courses_list[:use_top_k_courses]
+    allowed_courses = set(allowed_courses_list)
+
+    if not allowed_courses:
+        return []
+
+    comp_indices = [
+        idx
+        for idx, course in df[COURSE_COL].items()
+        if course in allowed_courses
+    ]
 
     if not comp_indices:
         return []
 
-    comp_mat = tfidf_matrix[comp_indices]             # M x D
-    sims = cosine_similarity(base_vec, comp_mat)[0]   # length M
+    comp_mat = tfidf_matrix[comp_indices]            # M x D
+    sims = cosine_similarity(base_vec, comp_mat)[0]  # length M
 
-    # Build raw results
     raw_rows = []
     for idx, sim in zip(comp_indices, sims):
         raw_rows.append(
@@ -161,7 +181,7 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
             }
         )
 
-    # Deduplicate: keep only the highest similarity per (course, clo_text)
+    # Deduplicate by (course, clo_text)
     best_by_key = {}
     for r in raw_rows:
         key = (r["course"], r["clo_text"])
@@ -175,7 +195,7 @@ def clo_vs_same_level_clos(base_idx, max_results=100):
 def course_clo_options(course):
     """
     Return list of {id, label} CLO options for a given course for dropdown.
-    Deduplicate CLO_TEXT within a course so you don't see the same text 10 times.
+    Deduplicate CLO_TEXT within a course so you don't see the same text repeated.
     """
     if not course:
         return []
@@ -244,7 +264,7 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if course_level_results %}
 <div class="result">
-    <h2>Overall Course vs Same-Level Courses (all departments)</h2>
+    <h2>Overall Course vs Same-Level Courses (top 30)</h2>
     <table>
         <tr><th>Course</th><th>Overall Similarity</th></tr>
         {% for r in course_level_results %}
@@ -259,7 +279,8 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 {% if clo_results %}
 <div class="result">
-    <h2>This CLO vs All CLOs in Same-Level Courses (other courses only)</h2>
+    <h2>This CLO vs CLOs in Top Similar Same-Level Courses (top 30)</h2>
+    <p><em>Compared against CLOs in the most similar same-level courses (other courses only).</em></p>
     <table>
         <tr><th>Course</th><th>CLO</th><th>Similarity</th></tr>
         {% for r in clo_results %}
@@ -280,7 +301,6 @@ th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # Default values
     course_a = request.form.get("course_a", "")
     clo_idx = request.form.get("clo_idx", "")
 
@@ -289,32 +309,33 @@ def index():
     course_level_results = []
     clo_results = []
 
-    try:
-        # CLO dropdown options depend on selected course
-        course_clos = course_clo_options(course_a)
+    # CLO dropdown options depend on selected course
+    course_clos = course_clo_options(course_a)
 
-        if request.method == "POST":
-            if not course_a:
-                error = "Select a course."
-            elif not clo_idx:
-                # User just changed course; only need to repopulate CLO dropdown.
-                pass
-            else:
+    if request.method == "POST":
+        if not course_a:
+            error = "Select a course."
+        elif not clo_idx:
+            # just changed course; only need to repopulate CLO dropdown
+            pass
+        else:
+            try:
                 base_idx = int(clo_idx)
-                # sanity check: ensure this CLO actually belongs to the selected course
                 if base_idx < 0 or base_idx >= len(df):
                     error = "Invalid CLO selection. Please choose again."
                 elif df.loc[base_idx, COURSE_COL] != course_a:
                     error = "Selected CLO does not belong to the chosen course."
                 else:
                     base_clo_text = df.loc[base_idx, "CLO_TEXT"]
-                    course_level_results = course_vs_level_similarity(course_a)
-                    clo_results = clo_vs_same_level_clos(base_idx)
-
-    except Exception as e:
-        # Catch ANY unexpected error and show it instead of 502
-        error = f"Unexpected error: {type(e).__name__}: {e}"
-        course_clos = course_clo_options(course_a)
+                    course_level_results = course_vs_level_similarity(course_a, top_n=30)
+                    clo_results = clo_vs_same_level_clos(
+                        base_idx,
+                        course_level_results,
+                        max_results=30,
+                        use_top_k_courses=30,
+                    )
+            except (ValueError, KeyError, IndexError) as e:
+                error = f"Invalid CLO selection: {e}"
 
     return render_template_string(
         HTML,

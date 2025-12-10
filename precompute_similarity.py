@@ -141,10 +141,8 @@ def main():
         if lvl is None:
             continue
 
-        # candidates: all CLOs in same-level courses EXCLUDING same course
-        same_level_courses = [
-            c for c in level_to_courses[lvl] if c != base_course
-        ]
+        # candidates: ALL CLOs in ALL same-level courses, including same course
+        same_level_courses = level_to_courses[lvl]
         if not same_level_courses:
             continue
 
@@ -162,15 +160,20 @@ def main():
         sims = np.asarray(sims_sparse.todense()).ravel()
 
         pairs = list(zip(cand_indices, sims))
+        # sort by similarity descending (no cutoff – we allow low sims)
         pairs.sort(key=lambda x: x[1], reverse=True)
 
         seen_texts = set()
         unique_text_count = 0
 
         for other_idx, sim in pairs:
+            # don't compare a CLO to itself
+            if other_idx == base_idx:
+                continue
+
             clo_text = df.at[other_idx, "CLO_TEXT"]
 
-            # group rule 2A: by exact CLO text
+            # group by EXACT CLO text (rule 2A)
             if clo_text not in seen_texts:
                 # if this would be the 26th unique text, stop
                 if unique_text_count >= DISPLAY_TOP:

@@ -1,6 +1,6 @@
 import os
 import re
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 import pandas as pd
 import numpy as np
@@ -10,12 +10,12 @@ from sklearn.preprocessing import normalize
 DATA_FILE = "All CLOs copy.xlsx"
 SHEET_NAME = "All CLOs_data (1)"
 
-DISPLAY_TOP = 25          # we want 25 grouped rows in the end
-HASH_DIM = 4096           # keeps RAM lower
+DISPLAY_TOP = 25        # target number of grouped rows
+HASH_DIM = 4096         # hashing dimension (keeps memory smaller)
 
 
-def parse_course_level(code: str | int | float):
-    """Get 100, 200, 300, ... from the first digit of the course number."""
+def parse_course_level(code):
+    """Return 100, 200, 300, ... from the first digit of the course number."""
     if not isinstance(code, str):
         code = str(code)
     m = re.search(r"(\d+)", code)
@@ -31,7 +31,7 @@ def main():
     print("Reading Excel...")
     df = pd.read_excel(DATA_FILE, sheet_name=SHEET_NAME).reset_index(drop=True)
 
-    # figure out course column name
+    # detect course column
     if "COURSE" in df.columns:
         course_col = "COURSE"
     elif "Course" in df.columns:
@@ -45,7 +45,7 @@ def main():
     n = len(df)
     print(f"{n} CLO rows.")
 
-    # ---------- TF-IDF-ish with hashing (small memory) ----------
+    # -------- Vectorize CLO text --------
     print("Vectorizing text with HashingVectorizer...")
     hv = HashingVectorizer(
         n_features=HASH_DIM,
@@ -53,25 +53,27 @@ def main():
         norm=None,
     )
     X = hv.transform(df["CLO_TEXT"])
-    X = normalize(X, axis=1)  # each row length 1
+    X = normalize(X, axis=1)  # row-normed vectors
 
-    # group row indices by course
+    # map: course -> row indices
     course_to_rows = defaultdict(list)
     for i, c in df[course_col].items():
         course_to_rows[c].append(i)
 
     courses = sorted(course_to_rows.keys())
 
-    # precompute level → courses mapping once
+    # map: level -> list of courses
     level_to_courses = defaultdict(list)
     for c in courses:
         lvl = parse_course_level(c)
         if lvl is not None:
             level_to_courses[lvl].append(c)
 
-    # ---------- COURSE vs COURSE (guarantee up to 25 groups) ----------
+    # =========================================================
+    #  COURSE vs COURSE  (grouped, up to 25 similarity groups)
+    # =========================================================
+    print("Computing course–course similarities (grouped to 25)...")
     course_rows = []
-    print("Computing course–course similarities with grouping up to 25...")
 
     for course_a in courses:
         lvl_a = parse_course_level(course_a)
@@ -79,16 +81,14 @@ def main():
         if not idx_a or lvl_a is None:
             continue
 
-        # mean vector for base course
-        mean_a = X[idx_a].mean(axis=0)
-        mean_a_vec = np.asarray(mean_a).ravel()
-
-        # candidates: all same-level courses except itself
         same_level_courses = [
             c for c in level_to_courses[lvl_a] if c != course_a
         ]
         if not same_level_courses:
             continue
+
+        mean_a = X[idx_a].mean(axis=0)
+        mean_a_vec = np.asarray(mean_a).ravel()
 
         sims = []
         for course_b in same_level_courses:
@@ -103,33 +103,42 @@ def main():
         if not sims:
             continue
 
-        # sort by similarity descending
         sims.sort(key=lambda x: x[1], reverse=True)
 
-        grouped_keys = []     # order of unique rounded sims
-        grouped_key_set = set()
+        grouped = OrderedDict()  # key = rounded sim -> list of (course_b, sim)
 
         for course_b, sim in sims:
-            key = round(sim, 3)  # group rule A: similarity rounded to 3 decimals
+            key = round(sim, 3)  # group by similarity to 3 decimals
 
-            if key not in grouped_key_set:
-                # if this is the 26th new group, stop (we only want first 25 groups)
-                if len(grouped_keys) >= DISPLAY_TOP:
-                    break
-                grouped_keys.append(key)
-                grouped_key_set.add(key)
+            if key in grouped:
+                # existing group, always allowed
+                grouped[key].append((course_b, sim))
+            else:
+                # new group – only create if we don't already have 25 groups
+                if len(grouped) >= DISPLAY_TOP:
+                    # we already have 25 groups; ignore new keys
+                    continue
+                grouped[key] = [(course_b, sim)]
 
-            # now key is in the first <=25 groups, add this row
-            course_rows.append(
-                {"base_course": course_a, "other_course": course_b, "overall": sim}
-            )
+        # flatten out into rows
+        for key, entries in grouped.items():
+            for course_b, sim in entries:
+                course_rows.append(
+                    {
+                        "base_course": course_a,
+                        "other_course": course_b,
+                        "overall": sim,
+                    }
+                )
 
     course_sim_df = pd.DataFrame(course_rows)
     course_sim_df.to_csv("course_similarity_top.csv", index=False)
     print(f"Saved course_similarity_top.csv ({len(course_sim_df)} rows)")
 
-    # ---------- CLO vs CLO (guarantee up to 25 CLO text groups) ----------
-    print("Computing CLO–CLO similarities with grouping up to 25 texts...")
+    # =========================================================
+    #  CLO vs CLO  (grouped by CLO text, up to 25 distinct texts)
+    # =========================================================
+    print("Computing CLO–CLO similarities (grouped to 25 texts)...")
     clo_rows = []
 
     for base_idx in range(n):
@@ -141,8 +150,10 @@ def main():
         if lvl is None:
             continue
 
-        # candidates: ALL CLOs in ALL same-level courses, including same course
-        same_level_courses = level_to_courses[lvl]
+        # candidates: all CLOs in same-level courses, EXCEPT any CLOs in the same course
+        same_level_courses = [
+            c for c in level_to_courses[lvl] if c != base_course
+        ]
         if not same_level_courses:
             continue
 
@@ -153,42 +164,40 @@ def main():
         if not cand_indices:
             continue
 
-        base_vec = X[base_idx]          # 1 x D
-        cand_mat = X[cand_indices]      # M x D
+        base_vec = X[base_idx]       # 1 x D
+        cand_mat = X[cand_indices]   # M x D
 
         sims_sparse = base_vec.dot(cand_mat.T)
         sims = np.asarray(sims_sparse.todense()).ravel()
 
         pairs = list(zip(cand_indices, sims))
-        # sort by similarity descending (no cutoff – we allow low sims)
         pairs.sort(key=lambda x: x[1], reverse=True)
 
-        seen_texts = set()
-        unique_text_count = 0
+        grouped = OrderedDict()  # CLO_TEXT -> list of (other_idx, sim)
 
         for other_idx, sim in pairs:
-            # don't compare a CLO to itself
             if other_idx == base_idx:
                 continue
 
             clo_text = df.at[other_idx, "CLO_TEXT"]
 
-            # group by EXACT CLO text (rule 2A)
-            if clo_text not in seen_texts:
-                # if this would be the 26th unique text, stop
-                if unique_text_count >= DISPLAY_TOP:
-                    break
-                seen_texts.add(clo_text)
-                unique_text_count += 1
+            if clo_text in grouped:
+                grouped[clo_text].append((other_idx, sim))
+            else:
+                if len(grouped) >= DISPLAY_TOP:
+                    # already have 25 distinct CLO texts – ignore new ones
+                    continue
+                grouped[clo_text] = [(other_idx, sim)]
 
-            # store this row (may be another course with same text)
-            clo_rows.append(
-                {
-                    "base_idx": base_idx,
-                    "other_idx": int(other_idx),
-                    "similarity": float(sim),
-                }
-            )
+        for clo_text, entries in grouped.items():
+            for other_idx, sim in entries:
+                clo_rows.append(
+                    {
+                        "base_idx": base_idx,
+                        "other_idx": int(other_idx),
+                        "similarity": float(sim),
+                    }
+                )
 
     clo_sim_df = pd.DataFrame(clo_rows)
     clo_sim_df.to_csv("clo_similarity_top.csv", index=False)

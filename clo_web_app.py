@@ -12,8 +12,9 @@ SHEET_NAME = "All CLOs_data (1)"
 COURSE_SIM_FILE = "course_similarity_top.csv"
 CLO_SIM_FILE = "clo_similarity_top.csv"
 
-DISPLAY_TOP = 25
-HASH_DIM = 4096  # for on-the-fly CLO detail similarity
+DISPLAY_TOP_COURSE = 25  # rows for course vs course
+DISPLAY_TOP_CLO = 20     # rows for CLO vs CLO
+HASH_DIM = 4096          # for on-the-fly CLO detail similarity
 
 # ---------- Load Excel ----------
 if not os.path.exists(DATA_FILE):
@@ -60,10 +61,10 @@ def course_clo_options(course):
 def course_vs_level_from_csv(course_a):
     """
     Use precomputed data to build course rows.
-    NO grouping – show up to DISPLAY_TOP raw rows so you actually see 25.
+    No grouping – show up to DISPLAY_TOP_COURSE raw rows.
     """
     subset = course_sim_df[course_sim_df["base_course"] == course_a]
-    subset = subset.sort_values("overall", ascending=False).head(DISPLAY_TOP)
+    subset = subset.sort_values("overall", ascending=False).head(DISPLAY_TOP_COURSE)
 
     rows = []
     for _, row in subset.iterrows():
@@ -82,23 +83,32 @@ def course_vs_level_from_csv(course_a):
 def clo_vs_level_from_csv(base_idx):
     """
     Use precomputed data to build CLO rows.
-    NO grouping by CLO text – show up to DISPLAY_TOP raw rows.
+    - Deduplicate by (course, CLO text): only one row per unique CLO text in a course.
+    - Show up to DISPLAY_TOP_CLO rows by highest similarity.
     """
-    subset = clo_sim_df[clo_sim_df["base_idx"] == base_idx]
-    subset = subset.sort_values("similarity", ascending=False).head(DISPLAY_TOP)
+    subset = clo_sim_df[clo_sim_df["base_idx"] == base_idx].copy()
+    if subset.empty:
+        return []
+
+    # Attach course & CLO text for the 'other' index
+    courses_series = df.loc[subset["other_idx"], COURSE_COL]
+    clo_text_series = df.loc[subset["other_idx"], "CLO_TEXT"]
+    subset["course"] = courses_series.values
+    subset["clo_text"] = clo_text_series.values
+
+    # Sort by similarity, then deduplicate by (course, clo_text), keeping the highest sim
+    subset = subset.sort_values("similarity", ascending=False)
+    subset = subset.groupby(["course", "clo_text"], as_index=False).first()
+    subset = subset.sort_values("similarity", ascending=False).head(DISPLAY_TOP_CLO)
 
     rows = []
     for _, row in subset.iterrows():
-        other_idx = int(row["other_idx"])
-        sim = float(row["similarity"])
-        course = df.loc[other_idx, COURSE_COL]
-        text = df.loc[other_idx, "CLO_TEXT"]
         rows.append(
             {
-                "courses": course,
-                "courses_list": [course],  # for clickable links
-                "clo_text": text,
-                "similarity": sim,
+                "courses": row["course"],
+                "courses_list": [row["course"]],
+                "clo_text": row["clo_text"],
+                "similarity": float(row["similarity"]),
             }
         )
     return rows
@@ -108,6 +118,7 @@ def compute_clo_detail_similarities(base_idx, target_course):
     """
     For a clicked course, compute similarity of the selected base CLO
     against ALL CLOs in the target course (on the fly).
+    Deduplicate target CLO texts: each distinct CLO appears once.
     """
     base_idx = int(base_idx)
     if base_idx < 0 or base_idx >= len(df):
@@ -144,7 +155,16 @@ def compute_clo_detail_similarities(base_idx, target_course):
             }
         )
 
+    # Deduplicate by CLO text, keeping highest similarity
+    dedup = {}
+    for r in results:
+        key = r["clo_text"]
+        if key not in dedup or r["similarity"] > dedup[key]["similarity"]:
+            dedup[key] = r
+
+    results = list(dedup.values())
     results.sort(key=lambda x: x["similarity"], reverse=True)
+
     return base_course, base_text, results
 
 

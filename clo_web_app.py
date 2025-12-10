@@ -1,6 +1,5 @@
 import os
 from textwrap import shorten
-from collections import defaultdict
 
 from flask import Flask, request, render_template_string, url_for
 import pandas as pd
@@ -14,8 +13,7 @@ COURSE_SIM_FILE = "course_similarity_top.csv"
 CLO_SIM_FILE = "clo_similarity_top.csv"
 
 DISPLAY_TOP = 25
-HASH_DIM = 4096  # for on-the-fly CLO similarity
-
+HASH_DIM = 4096  # for on-the-fly CLO detail similarity
 
 # ---------- Load Excel ----------
 if not os.path.exists(DATA_FILE):
@@ -45,7 +43,6 @@ if not (os.path.exists(COURSE_SIM_FILE) and os.path.exists(CLO_SIM_FILE)):
 course_sim_df = pd.read_csv(COURSE_SIM_FILE)
 clo_sim_df = pd.read_csv(CLO_SIM_FILE)
 
-
 # ---------- Helpers ----------
 def course_clo_options(course):
     """All distinct CLOs in a course (for dropdown)."""
@@ -61,81 +58,56 @@ def course_clo_options(course):
 
 
 def course_vs_level_from_csv(course_a):
-    """Use precomputed data to build grouped course rows (up to 25)."""
+    """
+    Use precomputed data to build course rows.
+    NO grouping – show up to DISPLAY_TOP raw rows so you actually see 25.
+    """
     subset = course_sim_df[course_sim_df["base_course"] == course_a]
-    subset = subset.sort_values("overall", ascending=False)
-
-    raw = [
-        {"course_b": row["other_course"], "overall": float(row["overall"])}
-        for _, row in subset.iterrows()
-    ]
-
-    groups = defaultdict(list)  # rounded sim -> list of course_b
-    for r in raw:
-        key = round(r["overall"], 3)
-        groups[key].append(r["course_b"])
+    subset = subset.sort_values("overall", ascending=False).head(DISPLAY_TOP)
 
     rows = []
-    for sim in sorted(groups.keys(), reverse=True):
-        courses_list = sorted(set(groups[sim]))
+    for _, row in subset.iterrows():
+        course_b = row["other_course"]
+        overall = float(row["overall"])
         rows.append(
             {
-                "courses": " / ".join(courses_list),
-                "courses_list": courses_list,
-                "overall": sim,
+                "courses": course_b,
+                "courses_list": [course_b],  # for clickable links
+                "overall": overall,
             }
         )
-
-    return rows[:DISPLAY_TOP]
+    return rows
 
 
 def clo_vs_level_from_csv(base_idx):
-    """Use precomputed data to build grouped CLO rows (up to 25)."""
+    """
+    Use precomputed data to build CLO rows.
+    NO grouping by CLO text – show up to DISPLAY_TOP raw rows.
+    """
     subset = clo_sim_df[clo_sim_df["base_idx"] == base_idx]
-    subset = subset.sort_values("similarity", ascending=False)
-
-    raw = []
-    for _, row in subset.iterrows():
-        other_idx = int(row["other_idx"])
-        raw.append(
-            {
-                "course": df.loc[other_idx, COURSE_COL],
-                "clo_text": df.loc[other_idx, "CLO_TEXT"],
-                "similarity": float(row["similarity"]),
-            }
-        )
-
-    # group by CLO text; collect all courses that share that text
-    groups = {}
-    for r in raw:
-        text = r["clo_text"]
-        sim = r["similarity"]
-        if text not in groups:
-            groups[text] = {"courses": set(), "similarity": sim}
-        groups[text]["courses"].add(r["course"])
-        if sim > groups[text]["similarity"]:
-            groups[text]["similarity"] = sim
+    subset = subset.sort_values("similarity", ascending=False).head(DISPLAY_TOP)
 
     rows = []
-    for text, info in groups.items():
-        courses_list = sorted(info["courses"])
+    for _, row in subset.iterrows():
+        other_idx = int(row["other_idx"])
+        sim = float(row["similarity"])
+        course = df.loc[other_idx, COURSE_COL]
+        text = df.loc[other_idx, "CLO_TEXT"]
         rows.append(
             {
-                "courses": " / ".join(courses_list),
-                "courses_list": courses_list,
+                "courses": course,
+                "courses_list": [course],  # for clickable links
                 "clo_text": text,
-                "similarity": info["similarity"],
+                "similarity": sim,
             }
         )
-
-    rows.sort(key=lambda x: x["similarity"], reverse=True)
-    return rows[:DISPLAY_TOP]
+    return rows
 
 
 def compute_clo_detail_similarities(base_idx, target_course):
     """
     For a clicked course, compute similarity of the selected base CLO
-    against ALL CLOs in the target course (on the fly, same level).
+    against ALL CLOs in the target course (on the fly).
     """
     base_idx = int(base_idx)
     if base_idx < 0 or base_idx >= len(df):
@@ -164,12 +136,10 @@ def compute_clo_detail_similarities(base_idx, target_course):
     sims = sims_sparse.toarray().ravel()
 
     results = []
-    for (idx, (_, row)), sim in zip(
-        enumerate(subset.itertuples(index=True)), sims
-    ):
+    for (_, row), sim in zip(subset.iterrows(), sims):
         results.append(
             {
-                "clo_text": row.CLO_TEXT,
+                "clo_text": row["CLO_TEXT"],
                 "similarity": float(sim),
             }
         )
@@ -234,9 +204,9 @@ a.course-link { text-decoration: none; }
 
 {% if course_level_results %}
 <div class="result">
-    <h2>Overall Course vs Same-Level Courses (grouped, top {{ course_level_results|length }})</h2>
+    <h2>Overall Course vs Same-Level Courses (top {{ course_level_results|length }})</h2>
     <table>
-        <tr><th>Course(s)</th><th>Overall Similarity</th></tr>
+        <tr><th>Course</th><th>Overall Similarity</th></tr>
         {% for r in course_level_results %}
         <tr>
             <td>
@@ -255,9 +225,9 @@ a.course-link { text-decoration: none; }
 
 {% if clo_results %}
 <div class="result">
-    <h2>This CLO vs CLOs in Same-Level Courses (grouped, top {{ clo_results|length }})</h2>
+    <h2>This CLO vs CLOs in Same-Level Courses (top {{ clo_results|length }})</h2>
     <table>
-        <tr><th>Course(s)</th><th>CLO</th><th>Similarity</th></tr>
+        <tr><th>Course</th><th>CLO</th><th>Similarity</th></tr>
         {% for r in clo_results %}
         <tr>
             <td>
@@ -278,7 +248,6 @@ a.course-link { text-decoration: none; }
 </body>
 </html>
 """
-
 
 DETAIL_HTML = """<!doctype html>
 <html>
@@ -321,7 +290,6 @@ a { text-decoration: none; }
 </body>
 </html>
 """
-
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -367,7 +335,6 @@ def index():
         clo_results=clo_results,
     )
 
-
 @app.route("/course_detail")
 def course_detail():
     course_a = request.args.get("course_a", "")
@@ -393,7 +360,6 @@ def course_detail():
         target_course=target_course,
         clo_sims=clo_sims,
     )
-
 
 if __name__ == "__main__":
     app.run(debug=False)

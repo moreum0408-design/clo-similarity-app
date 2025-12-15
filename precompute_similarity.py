@@ -174,8 +174,9 @@ def main():
             print(f"  CLO {base_idx}/{n}")
 
         base_level = levels[base_idx]
-        if base_level is None:
-            continue
+        if base_idx in [0, 1, 2]:  # temporarily pick a few, or set your specific base_idx
+            print("DEBUG base_course:", course_arr[base_idx], "base_level:", base_level, "base_prefix:", prefixes[base_idx])
+
 
         base_course = course_arr[base_idx]
         base_prefix = prefixes[base_idx]

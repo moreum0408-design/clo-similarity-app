@@ -7,52 +7,68 @@ import pandas as pd
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.preprocessing import normalize
 
+# =============================
+# CONFIG
+# =============================
 DATA_FILE = "All CLOs copy.xlsx"
 SHEET_NAME = "All CLOs_data (1)"
 
-TARGET_COURSE_ROWS = 25
-TARGET_CLO_ROWS = 20
+TARGET_COURSE_ROWS = 25   # per base course
+TARGET_CLO_ROWS = 20      # per base CLO
 HASH_DIM = 4096
 
+# HARD FILTERS
+MIN_SIMILARITY = 0.60     # anything below is dropped (no exceptions)
 
-# -----------------------------
-# COURSE NORMALIZATION
-# -----------------------------
+# =============================
+# NORMALIZATION & PARSING
+# =============================
 def normalize_course(code):
     """
     Normalize course codes so parsing is deterministic.
     Examples:
       ' HLSC 302 '   -> 'HLSC302'
-      'lcom3020'     -> 'LCOM3020'
-      'CJUS-338'     -> 'CJUS338'
+      'lcom-3020'    -> 'LCOM3020'
+      'CJUS 338A'    -> 'CJUS338A' (digits still parsed correctly)
     """
     if not isinstance(code, str):
         code = str(code)
-
     code = code.upper().strip()
+    # keep only letters and digits
     code = re.sub(r"[^A-Z0-9]", "", code)
     return code
 
 
-def parse_course_level(code):
-    """
-    STRICT level bucketing:
-      302   -> 300
-      338   -> 300
-      3020  -> 3000
-      3001  -> 3000
-    """
+def extract_digits(code):
+    """Return the numeric string inside a course code, or None."""
     m = re.search(r"(\d+)", code)
-    if not m:
-        return None
+    return m.group(1) if m else None
 
-    num = int(m.group(1))
+
+def digit_count(code):
+    """3 for 3xx, 4 for 30xx, etc."""
+    d = extract_digits(code)
+    return len(d) if d else None
+
+
+def level_bucket(code):
+    """
+    STRICT bucket:
+      302  -> 300
+      338  -> 300
+      3020 -> 3000
+      3001 -> 3000
+    """
+    d = extract_digits(code)
+    if not d:
+        return None
+    num = int(d)
     return (num // 100) * 100
 
 
-# -----------------------------
+# =============================
 # MAIN
-# -----------------------------
+# =============================
 def main():
     if not os.path.exists(DATA_FILE):
         raise FileNotFoundError(f"{DATA_FILE} not found")
@@ -66,29 +82,26 @@ def main():
     elif "Course" in df.columns:
         course_col = "Course"
     else:
-        raise ValueError("No COURSE column found")
+        raise ValueError("No COURSE/Course column found")
 
     if "CLO_TEXT" not in df.columns:
         raise ValueError("No CLO_TEXT column found")
 
-    # -----------------------------
-    # NORMALIZE INPUT
-    # -----------------------------
+    # Clean inputs
     df["CLO_TEXT"] = df["CLO_TEXT"].fillna("").astype(str)
     df[course_col] = df[course_col].fillna("").astype(str)
 
     # Normalize course codes ONCE
     df["COURSE_NORM"] = df[course_col].map(normalize_course)
-
-    # Precompute levels ONCE
-    df["LEVEL"] = df["COURSE_NORM"].map(parse_course_level)
+    df["DIGITS"] = df["COURSE_NORM"].map(digit_count)
+    df["LEVEL"] = df["COURSE_NORM"].map(level_bucket)
 
     n = len(df)
     print(f"{n} CLO rows after normalization")
 
-    # -----------------------------
+    # =============================
     # VECTORIZE TEXT
-    # -----------------------------
+    # =============================
     print("Vectorizing CLO text...")
     hv = HashingVectorizer(
         n_features=HASH_DIM,
@@ -97,11 +110,11 @@ def main():
     )
     X = hv.transform(df["CLO_TEXT"])
     X = normalize(X, axis=1)
-    print("Vectorization complete")
+    print("Vectorization done")
 
-    # -----------------------------
-    # COURSE GROUPING
-    # -----------------------------
+    # =============================
+    # GROUP BY COURSE
+    # =============================
     course_to_rows = defaultdict(list)
     for i, c in df["COURSE_NORM"].items():
         course_to_rows[c].append(i)
@@ -109,33 +122,35 @@ def main():
     courses = sorted(course_to_rows.keys())
     print(f"{len(courses)} distinct normalized courses")
 
-    # -----------------------------
-    # COURSE MEAN VECTORS
-    # -----------------------------
-    course_level = {}
+    # Precompute course vectors
     course_vec = {}
+    course_level = {}
+    course_digits = {}
 
     for c in courses:
-        lvl = parse_course_level(c)
+        lvl = level_bucket(c)
+        dct = digit_count(c)
         course_level[c] = lvl
+        course_digits[c] = dct
 
         idxs = course_to_rows[c]
-        if not idxs or lvl is None:
+        if not idxs or lvl is None or dct is None:
             continue
 
         mean_vec = X[idxs].mean(axis=0)
         course_vec[c] = np.asarray(mean_vec).ravel()
 
-    # -----------------------------
-    # COURSE vs COURSE (STRICT LEVEL)
-    # -----------------------------
-    print("Computing course-vs-course similarities...")
+    # =============================
+    # COURSE vs COURSE (STRICT)
+    # =============================
+    print("Computing course-vs-course (STRICT digit + level)...")
     course_rows = []
 
     for course_a in courses:
         lvl_a = course_level.get(course_a)
+        dig_a = course_digits.get(course_a)
         vec_a = course_vec.get(course_a)
-        if lvl_a is None or vec_a is None:
+        if lvl_a is None or dig_a is None or vec_a is None:
             continue
 
         sims = []
@@ -143,8 +158,10 @@ def main():
             if course_b == course_a:
                 continue
 
-            # STRICT: must be exact same bucket (300 != 3000)
+            # HARD GATES (NO FALLBACK)
             if course_level.get(course_b) != lvl_a:
+                continue
+            if course_digits.get(course_b) != dig_a:
                 continue
 
             vec_b = course_vec.get(course_b)
@@ -152,10 +169,12 @@ def main():
                 continue
 
             sim = float(vec_a @ vec_b)
+            if sim < MIN_SIMILARITY:
+                continue
+
             sims.append((course_b, sim))
 
         sims.sort(key=lambda x: x[1], reverse=True)
-
         for course_b, sim in sims[:TARGET_COURSE_ROWS]:
             course_rows.append(
                 {
@@ -169,27 +188,32 @@ def main():
     course_sim_df.to_csv("course_similarity_top.csv", index=False)
     print(f"Saved course_similarity_top.csv ({len(course_sim_df)} rows)")
 
-    # -----------------------------
-    # CLO vs CLO (STRICT LEVEL)
-    # -----------------------------
-    print("Computing CLO-vs-CLO similarities...")
+    # =============================
+    # CLO vs CLO (STRICT)
+    # =============================
+    print("Computing CLO-vs-CLO (STRICT digit + level, no fallback)...")
     clo_rows = []
 
     levels = df["LEVEL"].to_numpy()
+    digits = df["DIGITS"].to_numpy()
     courses_arr = df["COURSE_NORM"].to_numpy()
 
     for base_idx in range(n):
         base_level = levels[base_idx]
-        if base_level is None:
+        base_digits = digits[base_idx]
+        if base_level is None or base_digits is None:
             continue
 
         base_course = courses_arr[base_idx]
         base_vec = X[base_idx]
 
-        # STRICT: same level AND different course
-        mask = (levels == base_level) & (courses_arr != base_course)
+        # HARD MASK: same level + same digit count + different course
+        mask = (
+            (levels == base_level)
+            & (digits == base_digits)
+            & (courses_arr != base_course)
+        )
         cand_indices = np.where(mask)[0]
-
         if cand_indices.size == 0:
             continue
 
@@ -201,6 +225,9 @@ def main():
         for pos in order:
             idx_other = int(cand_indices[pos])
             sim = float(sims[pos])
+
+            if sim < MIN_SIMILARITY:
+                break  # because sorted desc
 
             key = (courses_arr[idx_other], df.at[idx_other, "CLO_TEXT"])
             if key in dedup:
@@ -223,7 +250,7 @@ def main():
     clo_sim_df.to_csv("clo_similarity_top.csv", index=False)
     print(f"Saved clo_similarity_top.csv ({len(clo_sim_df)} rows)")
 
-    print("DONE — strict 3xx vs 30xx enforced")
+    print("DONE — STRICT 3xx vs 30xx, digit-count enforced, threshold applied")
 
 
 if __name__ == "__main__":

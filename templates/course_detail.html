@@ -17,14 +17,17 @@
 <p><b>Base course:</b> {{ base_course }}</p>
 <p><b>Base CLO:</b> {{ base_clo }}</p>
 
-<p><a href="javascript:history.back()">&larr; Back</a></p>
+<!-- BACK LINK THAT DOES NOT RESET -->
+<p>
+  <a href="/?course={{ base_course|urlencode }}&clo={{ base_clo|urlencode }}">&larr; Back</a>
+</p>
 
 <hr>
 
 <h2>All CLOs in {{ course }}</h2>
 
 {% if not drilldown_enabled %}
-  <p><i>Note: drilldown file (clo_similarity_drilldown.csv) not found, so this view may show only a few rows.</i></p>
+  <p><i>Note: clo_similarity_drilldown.csv not found, so this view may show only a few rows.</i></p>
 {% endif %}
 
 {% if rows %}

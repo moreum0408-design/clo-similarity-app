@@ -5,49 +5,63 @@ from flask import Flask, render_template, request, abort
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
-CLO_SIM_FILE = "clo_similarity_top.csv"
-COURSE_SIM_FILE = "course_similarity_top.csv"
+# Existing files
+CLO_SIM_FILE = os.path.join(BASE_DIR, "clo_similarity_top.csv")
+COURSE_SIM_FILE = os.path.join(BASE_DIR, "course_similarity_top.csv")
+
+# NEW: drilldown file (top K CLOs within each clicked course)
+CLO_DRILL_FILE = os.path.join(BASE_DIR, "clo_similarity_drilldown.csv")
 
 DF_CLO = None
 DF_COURSE = None
+DF_DRILL = None
+
+
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["base_course"] = df["base_course"].astype(str).str.strip()
+    df["compare_course"] = df["compare_course"].astype(str).str.strip()
+    df["base_clo"] = df["base_clo"].astype(str).fillna("").str.strip()
+    df["compare_clo"] = df["compare_clo"].astype(str).fillna("").str.strip()
+    df["similarity"] = pd.to_numeric(df["similarity"], errors="coerce").fillna(0.0)
+    return df
 
 
 def load_data():
-    global DF_CLO, DF_COURSE
+    global DF_CLO, DF_COURSE, DF_DRILL
 
+    # CLO top list (used on the main page: top 20 across same-level courses)
     if DF_CLO is None:
         if not os.path.exists(CLO_SIM_FILE):
-            raise FileNotFoundError(f"Missing {CLO_SIM_FILE}. Run precompute_similarity.py first.")
+            raise FileNotFoundError(
+                f"Missing {os.path.basename(CLO_SIM_FILE)}. Run precompute_similarity.py first."
+            )
         DF_CLO = pd.read_csv(CLO_SIM_FILE)
 
         required = {"base_course", "base_clo", "compare_course", "compare_clo", "similarity"}
         missing = required - set(DF_CLO.columns)
         if missing:
-            raise ValueError(f"{CLO_SIM_FILE} missing columns: {sorted(missing)}")
+            raise ValueError(f"{os.path.basename(CLO_SIM_FILE)} missing columns: {sorted(missing)}")
 
-        # normalize
-        DF_CLO["base_course"] = DF_CLO["base_course"].astype(str).str.strip()
-        DF_CLO["compare_course"] = DF_CLO["compare_course"].astype(str).str.strip()
-        DF_CLO["base_clo"] = DF_CLO["base_clo"].astype(str).fillna("").str.strip()
-        DF_CLO["compare_clo"] = DF_CLO["compare_clo"].astype(str).fillna("").str.strip()
-        DF_CLO["similarity"] = pd.to_numeric(DF_CLO["similarity"], errors="coerce").fillna(0.0)
-
-        # hard dedupe (no repetition)
+        DF_CLO = _normalize_df(DF_CLO)
         DF_CLO.drop_duplicates(
             subset=["base_course", "base_clo", "compare_course", "compare_clo"],
             keep="first",
-            inplace=True
+            inplace=True,
         )
 
+    # Course top list (used on the main page: top 20 courses)
     if DF_COURSE is None:
         if not os.path.exists(COURSE_SIM_FILE):
-            raise FileNotFoundError(f"Missing {COURSE_SIM_FILE}. Run precompute_similarity.py first.")
+            raise FileNotFoundError(
+                f"Missing {os.path.basename(COURSE_SIM_FILE)}. Run precompute_similarity.py first."
+            )
         DF_COURSE = pd.read_csv(COURSE_SIM_FILE)
 
         required = {"base_course", "other_course", "overall"}
         missing = required - set(DF_COURSE.columns)
         if missing:
-            raise ValueError(f"{COURSE_SIM_FILE} missing columns: {sorted(missing)}")
+            raise ValueError(f"{os.path.basename(COURSE_SIM_FILE)} missing columns: {sorted(missing)}")
 
         DF_COURSE["base_course"] = DF_COURSE["base_course"].astype(str).str.strip()
         DF_COURSE["other_course"] = DF_COURSE["other_course"].astype(str).str.strip()
@@ -56,8 +70,30 @@ def load_data():
         DF_COURSE.drop_duplicates(
             subset=["base_course", "other_course"],
             keep="first",
-            inplace=True
+            inplace=True,
         )
+
+    # NEW: Drilldown CLO list (used on /course/<course_code>)
+    # If this file is missing, we still boot the app, but drilldown will be limited.
+    if DF_DRILL is None:
+        if os.path.exists(CLO_DRILL_FILE):
+            DF_DRILL = pd.read_csv(CLO_DRILL_FILE)
+
+            required = {"base_course", "base_clo", "compare_course", "compare_clo", "similarity"}
+            missing = required - set(DF_DRILL.columns)
+            if missing:
+                raise ValueError(
+                    f"{os.path.basename(CLO_DRILL_FILE)} missing columns: {sorted(missing)}"
+                )
+
+            DF_DRILL = _normalize_df(DF_DRILL)
+            DF_DRILL.drop_duplicates(
+                subset=["base_course", "base_clo", "compare_course", "compare_clo"],
+                keep="first",
+                inplace=True,
+            )
+        else:
+            DF_DRILL = None  # fallback mode
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -123,18 +159,29 @@ def course_detail(course_code):
         abort(400, "Missing base_course or base_clo")
 
     course_code = course_code.strip()
+    limit = request.args.get("limit", "50").strip()
+    try:
+        limit = max(1, min(200, int(limit)))
+    except Exception:
+        limit = 50
 
-    # show ALL CLOs in that clicked course with similarity to the selected base CLO
+    # Use DRILLDOWN DF if available; otherwise fallback to top-only DF_CLO (limited coverage)
+    src = DF_DRILL if DF_DRILL is not None else DF_CLO
+
     rows = (
-        DF_CLO.loc[
-            (DF_CLO["base_course"] == base_course)
-            & (DF_CLO["base_clo"] == base_clo)
-            & (DF_CLO["compare_course"] == course_code)
+        src.loc[
+            (src["base_course"] == base_course)
+            & (src["base_clo"] == base_clo)
+            & (src["compare_course"] == course_code)
         ]
         .drop_duplicates(subset=["compare_course", "compare_clo"])
         .sort_values("similarity", ascending=False)
+        .head(limit)
         .to_dict(orient="records")
     )
+
+    # If you still get very few rows, it means your drilldown CSV isn't generated yet.
+    drilldown_enabled = DF_DRILL is not None
 
     return render_template(
         "course_detail.html",
@@ -142,9 +189,10 @@ def course_detail(course_code):
         base_course=base_course,
         base_clo=base_clo,
         rows=rows,
+        drilldown_enabled=drilldown_enabled,
+        limit=limit,
     )
 
 
 if __name__ == "__main__":
-    # local only
     app.run(host="127.0.0.1", port=5000, debug=False)

@@ -5,11 +5,9 @@ from flask import Flask, render_template, request, abort
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
-# Existing files
+# Files (absolute paths so Render working-dir never matters)
 CLO_SIM_FILE = os.path.join(BASE_DIR, "clo_similarity_top.csv")
 COURSE_SIM_FILE = os.path.join(BASE_DIR, "course_similarity_top.csv")
-
-# NEW: drilldown file (top K CLOs within each clicked course)
 CLO_DRILL_FILE = os.path.join(BASE_DIR, "clo_similarity_drilldown.csv")
 
 DF_CLO = None
@@ -17,7 +15,7 @@ DF_COURSE = None
 DF_DRILL = None
 
 
-def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_clo_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["base_course"] = df["base_course"].astype(str).str.strip()
     df["compare_course"] = df["compare_course"].astype(str).str.strip()
@@ -30,34 +28,34 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 def load_data():
     global DF_CLO, DF_COURSE, DF_DRILL
 
-    # CLO top list (used on the main page: top 20 across same-level courses)
+    # CLO top list used on main page
     if DF_CLO is None:
         if not os.path.exists(CLO_SIM_FILE):
             raise FileNotFoundError(
                 f"Missing {os.path.basename(CLO_SIM_FILE)}. Run precompute_similarity.py first."
             )
-        DF_CLO = pd.read_csv(CLO_SIM_FILE)
 
+        DF_CLO = pd.read_csv(CLO_SIM_FILE)
         required = {"base_course", "base_clo", "compare_course", "compare_clo", "similarity"}
         missing = required - set(DF_CLO.columns)
         if missing:
             raise ValueError(f"{os.path.basename(CLO_SIM_FILE)} missing columns: {sorted(missing)}")
 
-        DF_CLO = _normalize_df(DF_CLO)
+        DF_CLO = _normalize_clo_df(DF_CLO)
         DF_CLO.drop_duplicates(
             subset=["base_course", "base_clo", "compare_course", "compare_clo"],
             keep="first",
             inplace=True,
         )
 
-    # Course top list (used on the main page: top 20 courses)
+    # Course top list used on main page
     if DF_COURSE is None:
         if not os.path.exists(COURSE_SIM_FILE):
             raise FileNotFoundError(
                 f"Missing {os.path.basename(COURSE_SIM_FILE)}. Run precompute_similarity.py first."
             )
-        DF_COURSE = pd.read_csv(COURSE_SIM_FILE)
 
+        DF_COURSE = pd.read_csv(COURSE_SIM_FILE)
         required = {"base_course", "other_course", "overall"}
         missing = required - set(DF_COURSE.columns)
         if missing:
@@ -73,12 +71,10 @@ def load_data():
             inplace=True,
         )
 
-    # NEW: Drilldown CLO list (used on /course/<course_code>)
-    # If this file is missing, we still boot the app, but drilldown will be limited.
+    # Drilldown CLO list used on /course/<course_code>
     if DF_DRILL is None:
         if os.path.exists(CLO_DRILL_FILE):
             DF_DRILL = pd.read_csv(CLO_DRILL_FILE)
-
             required = {"base_course", "base_clo", "compare_course", "compare_clo", "similarity"}
             missing = required - set(DF_DRILL.columns)
             if missing:
@@ -86,7 +82,7 @@ def load_data():
                     f"{os.path.basename(CLO_DRILL_FILE)} missing columns: {sorted(missing)}"
                 )
 
-            DF_DRILL = _normalize_df(DF_DRILL)
+            DF_DRILL = _normalize_clo_df(DF_DRILL)
             DF_DRILL.drop_duplicates(
                 subset=["base_course", "base_clo", "compare_course", "compare_clo"],
                 keep="first",
@@ -96,46 +92,54 @@ def load_data():
             DF_DRILL = None  # fallback mode
 
 
+def _clean(v: str | None) -> str | None:
+    v = (v or "").strip()
+    return v if v else None
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     load_data()
 
     courses = sorted(DF_CLO["base_course"].unique().tolist())
 
-    selected_course = None
-    selected_clo = None
+    # STATE RESTORE: allow GET params to repopulate selections
+    selected_course = _clean(request.args.get("course"))
+    selected_clo = _clean(request.args.get("clo"))
+
+    # POST overrides GET when user submits form
+    if request.method == "POST":
+        selected_course = _clean(request.form.get("course"))
+        selected_clo = _clean(request.form.get("clo"))
+
     clo_options = []
     course_results = []
     clo_results = []
 
-    if request.method == "POST":
-        selected_course = (request.form.get("course") or "").strip() or None
-        selected_clo = (request.form.get("clo") or "").strip() or None
+    if selected_course:
+        clo_options = (
+            DF_CLO.loc[DF_CLO["base_course"] == selected_course, "base_clo"]
+            .drop_duplicates()
+            .tolist()
+        )
 
-        if selected_course:
-            clo_options = (
-                DF_CLO.loc[DF_CLO["base_course"] == selected_course, "base_clo"]
-                .drop_duplicates()
-                .tolist()
-            )
+        course_results = (
+            DF_COURSE.loc[DF_COURSE["base_course"] == selected_course]
+            .sort_values("overall", ascending=False)
+            .head(20)
+            .to_dict(orient="records")
+        )
 
-            course_results = (
-                DF_COURSE.loc[DF_COURSE["base_course"] == selected_course]
-                .sort_values("overall", ascending=False)
-                .head(20)
-                .to_dict(orient="records")
-            )
-
-        if selected_course and selected_clo:
-            clo_results = (
-                DF_CLO.loc[
-                    (DF_CLO["base_course"] == selected_course)
-                    & (DF_CLO["base_clo"] == selected_clo)
-                ]
-                .sort_values("similarity", ascending=False)
-                .head(20)
-                .to_dict(orient="records")
-            )
+    if selected_course and selected_clo:
+        clo_results = (
+            DF_CLO.loc[
+                (DF_CLO["base_course"] == selected_course)
+                & (DF_CLO["base_clo"] == selected_clo)
+            ]
+            .sort_values("similarity", ascending=False)
+            .head(20)
+            .to_dict(orient="records")
+        )
 
     return render_template(
         "index.html",
@@ -152,20 +156,22 @@ def index():
 def course_detail(course_code):
     load_data()
 
-    base_course = (request.args.get("base_course") or "").strip()
-    base_clo = (request.args.get("base_clo") or "").strip()
-
+    base_course = _clean(request.args.get("base_course"))
+    base_clo = _clean(request.args.get("base_clo"))
     if not base_course or not base_clo:
         abort(400, "Missing base_course or base_clo")
 
     course_code = course_code.strip()
-    limit = request.args.get("limit", "50").strip()
-    try:
-        limit = max(1, min(200, int(limit)))
-    except Exception:
-        limit = 50
 
-    # Use DRILLDOWN DF if available; otherwise fallback to top-only DF_CLO (limited coverage)
+    # How many CLO rows to show on drilldown
+    limit_raw = (request.args.get("limit") or "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw else 200
+    except Exception:
+        limit = 200
+    limit = max(1, min(500, limit))
+
+    # Prefer drilldown DF, fallback to top DF
     src = DF_DRILL if DF_DRILL is not None else DF_CLO
 
     rows = (
@@ -180,7 +186,6 @@ def course_detail(course_code):
         .to_dict(orient="records")
     )
 
-    # If you still get very few rows, it means your drilldown CSV isn't generated yet.
     drilldown_enabled = DF_DRILL is not None
 
     return render_template(

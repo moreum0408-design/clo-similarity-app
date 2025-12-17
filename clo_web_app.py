@@ -2,7 +2,8 @@ import os
 import pandas as pd
 from flask import Flask, render_template, request, abort
 
-app = Flask(__name__, template_folder="templates")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
 CLO_SIM_FILE = "clo_similarity_top.csv"
 COURSE_SIM_FILE = "course_similarity_top.csv"

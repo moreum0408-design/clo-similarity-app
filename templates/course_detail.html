@@ -1,10 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Course {{ course }}</title>
+  <meta charset="utf-8" />
+  <title>Course Detail</title>
   <style>
     table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ccc; padding: 8px; }
+    th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
     th { background: #f2f2f2; }
     .wrap { white-space: normal; }
   </style>
@@ -16,25 +17,28 @@
 <p><b>Base course:</b> {{ base_course }}</p>
 <p><b>Base CLO:</b> {{ base_clo }}</p>
 
-<p><a href="/">← Back</a></p>
+<p><a href="javascript:history.back()">&larr; Back</a></p>
 
-<h2>ALL CLOs in {{ course }} (NO DUPLICATES)</h2>
+<hr>
+
+<h2>All CLOs in {{ course }}</h2>
+
+{% if not drilldown_enabled %}
+  <p><i>Note: drilldown file (clo_similarity_drilldown.csv) not found, so this view may show only a few rows.</i></p>
+{% endif %}
 
 {% if rows %}
-<table>
-  <tr>
-    <th class="wrap">CLO</th>
-    <th>Similarity</th>
-  </tr>
-  {% for r in rows %}
-  <tr>
-    <td class="wrap">{{ r.compare_clo }}</td>
-    <td>{{ r.similarity }}</td>
-  </tr>
-  {% endfor %}
-</table>
+  <table>
+    <tr><th class="wrap">CLO</th><th>Similarity</th></tr>
+    {% for r in rows %}
+      <tr>
+        <td class="wrap">{{ r.compare_clo }}</td>
+        <td>{{ "%.3f"|format(r.similarity) }}</td>
+      </tr>
+    {% endfor %}
+  </table>
 {% else %}
-<p>No CLOs found.</p>
+  <p>No rows found for this course + base CLO combination.</p>
 {% endif %}
 
 </body>

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Course {{ course }}</title>
+  <style>
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 8px; }
+    th { background: #f2f2f2; }
+    .wrap { white-space: normal; }
+  </style>
+</head>
+<body>
+
+<h1>Course: {{ course }}</h1>
+
+<p><b>Base course:</b> {{ base_course }}</p>
+<p><b>Base CLO:</b> {{ base_clo }}</p>
+
+<p><a href="/">← Back</a></p>
+
+<h2>ALL CLOs in {{ course }} (NO DUPLICATES)</h2>
+
+{% if rows %}
+<table>
+  <tr>
+    <th class="wrap">CLO</th>
+    <th>Similarity</th>
+  </tr>
+  {% for r in rows %}
+  <tr>
+    <td class="wrap">{{ r.compare_clo }}</td>
+    <td>{{ r.similarity }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>No CLOs found.</p>
+{% endif %}
+
+</body>
+</html>

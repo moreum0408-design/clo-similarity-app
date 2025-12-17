@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CLO Similarity Tool</title>
+  <style>
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
+    th { background: #f2f2f2; }
+    .wrap { white-space: normal; }
+  </style>
+</head>
+<body>
+
+<h1>CLO Similarity Tool</h1>
+
+<form method="POST">
+  <label>Course:</label>
+  <select name="course" onchange="this.form.submit()">
+    <option value="">-- Select --</option>
+    {% for c in courses %}
+      <option value="{{ c }}" {% if c == selected_course %}selected{% endif %}>{{ c }}</option>
+    {% endfor %}
+  </select>
+
+  <br><br>
+
+  <label>CLO (from selected course):</label>
+  <select name="clo">
+    <option value="">-- Select --</option>
+    {% for clo in clo_options %}
+      <option value="{{ clo }}" {% if clo == selected_clo %}selected{% endif %}>{{ clo }}</option>
+    {% endfor %}
+  </select>
+
+  <br><br>
+  <button type="submit">Compare</button>
+</form>
+
+<hr>
+
+<h2>Overall Course vs Same-Level Courses (top 20)</h2>
+{% if course_results and selected_course and selected_clo %}
+  <table>
+    <tr><th>Course</th><th>Overall</th></tr>
+    {% for r in course_results %}
+      <tr>
+        <td>
+          <a href="/course/{{ r.other_course }}?base_course={{ selected_course|urlencode }}&base_clo={{ selected_clo|urlencode }}">
+            {{ r.other_course }}
+          </a>
+        </td>
+        <td>{{ "%.3f"|format(r.overall) }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+{% elif course_results %}
+  <table>
+    <tr><th>Course</th><th>Overall</th></tr>
+    {% for r in course_results %}
+      <tr>
+        <td>{{ r.other_course }}</td>
+        <td>{{ "%.3f"|format(r.overall) }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+  <p><i>Pick a CLO too if you want course-click drilldown to show CLO-level details.</i></p>
+{% else %}
+  <p>No course similarity rows found for this course.</p>
+{% endif %}
+
+<hr>
+
+<h2>This CLO vs CLOs in Same-Level Courses (top 20)</h2>
+
+{% if clo_results %}
+  <table>
+    <tr><th>Course</th><th class="wrap">CLO</th><th>Similarity</th></tr>
+    {% for r in clo_results %}
+      <tr>
+        <td>
+          <a href="/course/{{ r.compare_course }}?base_course={{ selected_course|urlencode }}&base_clo={{ selected_clo|urlencode }}">
+            {{ r.compare_course }}
+          </a>
+        </td>
+        <td class="wrap">{{ r.compare_clo }}</td>
+        <td>{{ "%.3f"|format(r.similarity) }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+{% else %}
+  <p>No CLO similarity rows found (pick a course + CLO, then Compare).</p>
+{% endif %}
+
+</body>
+</html>

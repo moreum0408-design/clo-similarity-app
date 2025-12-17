@@ -15,9 +15,15 @@
 <h1>Course: {{ course }}</h1>
 
 <p><b>Base course:</b> {{ base_course }}</p>
+
+{% if overall is not none %}
+  <p><b>Overall course similarity:</b> {{ "%.3f"|format(overall) }}</p>
+{% else %}
+  <p><b>Overall course similarity:</b> (not found in course_similarity_top.csv)</p>
+{% endif %}
+
 <p><b>Base CLO:</b> {{ base_clo }}</p>
 
-<!-- BACK LINK THAT DOES NOT RESET -->
 <p>
   <a href="/?course={{ base_course|urlencode }}&clo={{ base_clo|urlencode }}">&larr; Back</a>
 </p>

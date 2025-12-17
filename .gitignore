@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 *.xlsx
 
+
+clo_similarity_drilldown.csv
+
